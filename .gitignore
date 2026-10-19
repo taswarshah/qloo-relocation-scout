@@ -8,3 +8,7 @@ cache/
 *.json.cache
 qloo_responses/
 .pytest_cache/
+
+# Screenshots containing Qloo results stay local (Qloo terms: no response data in a public repo); upload them to Devpost directly
+docs/screenshots/*results*.png
+docs/screenshots/*compare*.png

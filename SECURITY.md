@@ -15,7 +15,9 @@ No Qloo API responses, fixtures or caches are stored in this repo, as Qloo's hac
 | Area | Control |
 |---|---|
 | Input | Strict schema (unknown fields rejected); each field ≤400 chars; ≤5 items per field (each ≤80 chars, control chars stripped); ≤12 entities and ≤5 lifestyle tags in total; country must match `^[A-Z]{2}$`; request body ≤4 KB |
-| Abuse / quota | Per-IP limit (`RATE_LIMIT_PER_MIN`, default 5/min); concurrent agent runs capped (`MAX_CONCURRENT_SCOUTS`, default 3; extra requests get a 503); Qloo calls throttled (`QLOO_CONCURRENCY`=4) with a short capped 429 backoff; Qloo timeout 10s per call; 60s overall timeout per run |
+| Abuse / quota | Per-IP limit (`RATE_LIMIT_PER_MIN`, default 12/min); concurrent agent runs capped (`MAX_CONCURRENT_SCOUTS`, default 3; extra requests get a 503); Qloo calls throttled (`QLOO_CONCURRENCY`=6) with a short capped 429 backoff; Qloo timeout 6s per call (a failed call degrades only its part of the result and is reported in `health`); 60s overall timeout per run |
+| Upstream failures | Counted per endpoint; the response gets `health.partial` plus a fixed, safe warning. Upstream bodies, URLs, params and keys are never returned or logged (log lines hold only the path and status) |
+| Compare field | ≤60 chars, no control chars or `<>{}` |
 | Sharing | Share links contain only the user's own form inputs (no results or Qloo data); they're re-validated server-side like any request |
 | Output | The frontend builds the DOM with `textContent` only (no HTML injection); no inline scripts, styles or event handlers |
 | Headers | CSP (`default-src 'self'`, `frame-ancestors 'none'`, no `unsafe-inline`), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Permissions-Policy`, COOP, and HSTS in production |

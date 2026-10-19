@@ -15,16 +15,22 @@ Enter the artists, films, shows, books, restaurants, brands and lifestyle words 
 - a **local vibe** distilled from venue tags (historic, walkable, lively…),
 - a plain-English **why**, built only from Qloo data, so it never makes up facts,
 - a **shareable link** that reproduces your profile,
-- a visible **agent trace** of every Qloo call, with timings.
+- a visible **agent trace** of every Qloo call, with timings,
+- **"Why not my city?"**: type a city you're already considering and get its real Qloo score next to your top pick, with the taste-by-taste gap (e.g. "Dubai scores 69/100, 12 points behind Reykjavik (81). The biggest gaps: Bon Iver (52 vs 90), Lost in Translation (58 vs 87)"),
+- **side-by-side comparison** of any two cities: overall and per-taste Qloo affinity, shared and unique cultural signals, neighborhood evidence and data coverage. Only real Qloo numbers, no invented composite score,
+- **honest failure handling**: if Qloo is slow or failing, the page says the results are partial instead of pretending there were no matches.
 
 ## How it uses Qloo (Technological Implementation)
 A deterministic, multi-step agent that orchestrates 15–18 Qloo calls per scout, in three parallel rounds:
 1. **Perceive:** `/search` resolves each free-text taste to a Qloo entity across 6 entity types (artist, movie, tv_show, book, place, brand). At the same time, `/v2/tags` maps lifestyle words to Qloo tag URNs, preferring destination tags.
-2. **Rank and attribute:** `/v2/insights` with `filter.type=urn:entity:destination` uses all entity and tag signals combined (optionally `filter.geocode.country_code`) to rank cities. In parallel, one insights call per taste builds an attribution matrix, so every city explains which tastes drive its score. This is Qloo's cross-domain affinity made visible.
-3. **Zoom in:** for each city, `/v2/insights` with `filter.type=urn:entity:place&filter.location.query=<city>` and the same signals finds venues that share your taste.
-4. **Reason:** the agent cleans and validates the venue data. It strips administrative prefixes ("UPZs Localidad Chapinero" → "Chapinero"), drops venues whose address or geocode contradicts the city or country (handling US territories such as Puerto Rico), merges near-duplicate destinations within 30 km, filters amenity and COVID-era tags out of the vibe, and groups the remainder into neighborhoods.
+2. **Rank:** `/v2/insights` with `filter.type=urn:entity:destination` uses all entity and tag signals combined (optionally `filter.geocode.country_code`). The user's own candidate city is scored on the same signals via `filter.results.entities`.
+3. **Attribute (exact):** one insights call per taste, restricted with `filter.results.entities` to exactly the shown cities, builds an attribution matrix keyed by entity ID. Every city explains which tastes drive its score: Qloo's cross-domain affinity made visible.
+4. **Zoom in:** for each city, `/v2/insights` with `filter.type=urn:entity:place`, `filter.location=POINT(lon lat)` and `filter.location.radius` (15 km, widening to 60 km when data is thin) finds venues that share your taste. Coordinates avoid name collisions: "Flores" by name resolves to a Buenos Aires barrio instead of Flores, Guatemala. Venues are ranked by affinity, and hotels, schools, offices, gas stations and transit are filtered out using Qloo category tags.
+5. **Reason:** the agent cleans and validates the venue data. It strips administrative prefixes ("UPZs Localidad Chapinero" → "Chapinero"), drops venues whose address or geocode contradicts the city or country (handling US territories such as Puerto Rico), merges near-duplicate destinations within 30 km, filters amenity and COVID-era tags out of the vibe, and groups the remainder into neighborhoods.
 
-**Engineering:** async Python (FastAPI and httpx) with bounded concurrency, a pooled keep-alive client, a short capped 429 backoff, and a private in-memory TTL cache that Qloo's guide permits (no Qloo data is ever written to disk or the repo). Measured cold p50 is **4.3 s** (down from 6.5 s), and cached repeats take under 50 ms. There are 41 offline tests using synthetic data, and CI runs pytest, pip-audit, bandit and gitleaks.
+**Engineering:** async Python (FastAPI and httpx) with bounded concurrency, a pooled keep-alive client, a short capped 429 backoff, and a private in-memory TTL cache that Qloo's guide permits (no Qloo data is ever written to disk or the repo). Measured cold p50 is **4.1 s** across 10 personas (down from 6.5 s), and cached repeats take under 50 ms. There are 55 offline tests using synthetic data, and CI runs pytest, pip-audit, bandit and gitleaks.
+
+**Evaluation** (`eval/`, 10 synthetic personas, live Qloo): 100% of tastes and lifestyle words resolved; **100% of explanation claims automatically verified against Qloo-derived data (436/436)**; changing a persona's tastes changes the top-4 cities almost entirely (mean Jaccard overlap 0.11); every shown city has local evidence.
 
 ## Design
 It's a complete product, not a notebook: a hero section and a 3-step explainer, a grouped form with presets, input hints and validation, a loading state with live status, empty and error states, score badges, affinity meters, neighborhood and fallback spot lists, vibe chips, shareable links and a footer. It's responsive down to mobile and accessible (labels, skip link, `aria-live` results, meters with ARIA labels, keyboard focus styles). A strict Content-Security-Policy is in force, with no inline code and no third-party scripts.

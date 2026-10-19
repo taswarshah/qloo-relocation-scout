@@ -196,7 +196,7 @@ def test_top_spots_fallback_is_ranked_capped_and_explained(monkeypatch):
     result = scout_places(monkeypatch, places)
     assert result["neighborhoods"] == []
     assert result["top_spots"] == ["Invented Favorite Gallery", "Invented Bookshop", "Invented Bakery", "Invented Park"]
-    assert "Top spots" in result["why"]
+    assert "Top taste-matched spots" in result["why"]
     assert "Invented Favorite Gallery" in result["why"]
     assert "Invented Bookshop" in result["why"]
     assert "Invented Foreign Club" not in result["why"]
@@ -206,7 +206,7 @@ def test_empty_places_are_handled(monkeypatch):
     result = scout_places(monkeypatch, [])
     assert result["neighborhoods"] == []
     assert result["top_spots"] == []
-    assert "Top spots" not in result["why"]
+    assert "Top taste-matched spots" not in result["why"]
 
 
 class StaticSecurityParser(HTMLParser):
@@ -284,3 +284,171 @@ def test_nearby_duplicate_cities_merged():
     a = {"name": "Cartagena De Indias", "location": {"lat": 10.39, "lon": -75.51}, "properties": {"geocode": {"country_code": "CO"}}}
     b = {"name": "Cartagena", "location": {"lat": 10.42, "lon": -75.53}, "properties": {"geocode": {"country_code": "CO"}}}
     assert [c["name"] for c in agent.unique_cities([a, b], 4)] == ["Cartagena De Indias"]
+
+
+# ---------- Round 3: edge cases, observability, relevance, thin data, comparison ----------
+import asyncio
+import httpx
+
+
+def _dest(name, cc, lat, lon, eid=None):
+    return {"name": name, "entity_id": eid or name, "location": {"lat": lat, "lon": lon},
+            "properties": {"geocode": {"country_code": cc}}, "query": {"affinity": 0.5}}
+
+
+def test_nearby_cities_across_border_not_merged():
+    # El Paso (US) and Ciudad Juárez (MX) are ~5 km apart but in different countries.
+    a, b = _dest("El Paso", "US", 31.76, -106.49), _dest("Ciudad Juarez", "MX", 31.72, -106.46)
+    assert [c["name"] for c in agent.unique_cities([a, b], 4)] == ["El Paso", "Ciudad Juarez"]
+
+
+def test_same_name_tastes_keyed_by_id():
+    """Two different entities called 'Up' (film vs band) must keep separate attribution."""
+    city = _dest("Testville", "ZZ", 1, 1, "city1")
+    entities = [{"id": "film-up", "name": "Up", "category": "films"}, {"id": "band-up", "name": "Up", "category": "music"}]
+    per_taste = {"film-up": {"city1": 0.9}, "band-up": {"city1": 0.4}}
+    result = agent.build_city(city, ([], True, 15), per_taste, entities)
+    assert sorted((d["id"], d["affinity"]) for d in result["drivers"]) == [("band-up", 0.4), ("film-up", 0.9)]
+
+
+def _run_with_transport(monkeypatch, handler, coro_fn):
+    client = httpx.AsyncClient(base_url="https://example.invalid", headers={"X-Api-Key": "k"},
+                               transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(agent, "_shared_client", lambda: client)
+    monkeypatch.setattr(agent.asyncio, "sleep", _nosleep)
+    agent._CACHE.clear()
+    try:
+        return asyncio.run(coro_fn())
+    finally:
+        agent._CACHE.clear()
+
+
+async def _nosleep(*_a, **_k):
+    return None
+
+
+def test_upstream_errors_tracked_not_silent(monkeypatch):
+    monkeypatch.undo()
+    def handler(request):
+        if request.url.path == "/search":
+            raise httpx.ReadTimeout("slow", request=request)
+        if request.url.path == "/v2/tags":
+            return httpx.Response(429)
+        return httpx.Response(500, text="secret upstream body")
+    async def go():
+        q = agent.Qloo()
+        await q.search("x", "urn:entity:artist")
+        await q.tags("y")
+        await q.insights(filter__type="urn:entity:destination")
+        return q
+    q = _run_with_transport(monkeypatch, handler, go)
+    h = q.health()
+    assert h["partial"] and h["failed_calls"] == 3
+    assert h["endpoints"]["/search"]["timeouts"] == 1
+    assert h["endpoints"]["/v2/tags"]["rate_limited"] == 1 and h["endpoints"]["/v2/tags"]["retries"] == 3
+    assert h["endpoints"]["/v2/insights"]["http_errors"] == 1
+    assert "secret upstream body" not in str(h) and "k" != str(h)
+    assert not agent._CACHE  # failures are never cached
+
+
+def test_outage_is_503_with_safe_message(monkeypatch):
+    monkeypatch.undo()
+    def handler(request):
+        return httpx.Response(502, text="internal stack trace test-key-not-real")
+    client = httpx.AsyncClient(base_url="https://example.invalid", transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(agent, "_shared_client", lambda: client)
+    agent._CACHE.clear(); appmod._hits.clear()
+    r = c.post("/api/scout", json={"music": "Anything"})
+    assert r.status_code == 503
+    assert "not responding" in r.json()["error"] and "stack trace" not in r.text and "test-key" not in r.text
+
+
+def test_partial_results_flagged():
+    async def flaky_get(self, path, params):
+        if params.get("filter.type") == "urn:entity:place":
+            self.stats[path]["calls"] += 1; self.stats[path]["timeouts"] += 1
+            return {}
+        return await fake_get(self, path, params)
+    import pytest as _p
+    mp = _p.MonkeyPatch(); mp.setattr(agent.Qloo, "get", flaky_get)
+    try:
+        body = c.post("/api/scout", json={"music": "Anything"}).json()
+    finally:
+        mp.undo()
+    assert body["health"]["partial"] is True and "incomplete" in body["warning"]
+
+
+def test_irrelevant_place_types_filtered():
+    def p(name, *cats):
+        return {"name": name, "tags": [{"type": "urn:tag:category:place", "name": c} for c in cats]}
+    assert not agent.is_relevant_place(p("Grand Hotel", "Hotel"))
+    assert not agent.is_relevant_place(p("Lincoln High", "Educational institution"))
+    assert not agent.is_relevant_place(p("Shell", "Gas station"))
+    assert not agent.is_relevant_place(p("15 Avenida 5 calle"))
+    assert agent.is_relevant_place(p("Hotel Bar", "Hotel", "Bar"))  # hotel that is also a bar
+    assert agent.is_relevant_place(p("Gallery", "Art gallery"))
+
+
+def test_spots_ranked_by_affinity():
+    city = _dest("Town", "ZZ", 1, 1)
+    places = [{"name": n, "query": {"affinity": a}, "properties": {}, "tags": []} for n, a in [("Low", 0.2), ("High", 0.9), ("Mid", 0.5)]]
+    _, spots, _ = agent.summarize_places(places, city, True)
+    assert spots == ["High", "Mid", "Low"]
+
+
+def test_thin_city_widens_radius(monkeypatch):
+    calls = []
+    async def fake_insights(self, **params):
+        calls.append(params.get("filter__location__radius"))
+        n = 0 if params.get("filter__location__radius") == 15000 else 4
+        return [{"name": f"Spot{i}", "properties": {}, "tags": [], "query": {"affinity": 0.5}} for i in range(n)]
+    monkeypatch.setattr(agent.Qloo, "insights", fake_insights)
+    async def go():
+        return await agent.find_places(agent.Qloo.__new__(agent.Qloo), _dest("Flores", "GT", 16.9, -89.9), {})
+    places, by_radius, radius = asyncio.run(go())
+    assert calls == [15000, 60000] and radius == 60 and by_radius and len(places) == 4
+
+
+def test_location_uses_coordinates_not_ambiguous_name():
+    assert agent.point(_dest("Flores", "GT", 16.93, -89.89)) == "POINT(-89.89 16.93)"
+
+
+def test_compare_verdict_uses_real_scores():
+    ents = [{"id": "a", "name": "A", "category": "music"}, {"id": "b", "name": "B", "category": "films"}]
+    top = {"city": "Top", "affinity": 0.8, "drivers": [{"id": "a", "taste": "A", "affinity": 0.9, "category": "music"},
+                                                       {"id": "b", "taste": "B", "affinity": 0.7, "category": "films"}], "why": ""}
+    cand = {"city": "Cand", "affinity": 0.6, "drivers": [{"id": "a", "taste": "A", "affinity": 0.5, "category": "music"}], "why": ""}
+    cmp = agent.compare("Cand", cand, top, ents)
+    assert cmp["gap"] == 0.2 and cmp["rows"][1] == {"taste": "B", "candidate": 0.0, "top_pick": 0.7}
+    assert "20 points behind Top" in cmp["verdict"] and "A (50 vs 90)" in cmp["verdict"]
+    assert "error" in agent.compare("Nowhere", None, top, ents)
+
+
+def test_compare_input_validated():
+    assert c.post("/api/scout", json={"music": "A", "compare": "<script>"}).status_code == 422
+    assert c.post("/api/scout", json={"music": "A", "compare": "x" * 61}).status_code == 422
+
+
+def test_default_rate_limit_is_12(monkeypatch):
+    import importlib
+    monkeypatch.delenv("RATE_LIMIT_PER_MIN", raising=False)
+    src = open(os.path.join(os.path.dirname(__file__), "..", "app.py")).read()
+    assert 'os.getenv("RATE_LIMIT_PER_MIN", "12")' in src
+
+
+def test_city_named_venue_excluded():
+    city = _dest("San Juan", "PR", 18.4, -66.1)
+    places = [{"name": "San Juan, Puerto Rico", "properties": {}, "tags": []}, {"name": "La Placita", "properties": {}, "tags": []}]
+    assert [p["name"] for p in agent.local_relevant(places, city, True)] == ["La Placita"]
+
+
+def test_eval_claim_checker_detects_unbacked_claims():
+    import sys as _s; _s.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "eval"))
+    import run_eval
+    city = {"city": "X", "affinity": 0.8, "drivers": [{"taste": "A", "affinity": 0.9}], "city_tags": ["Beaches"],
+            "neighborhoods": [{"name": "Old Town", "spots": ["Cafe, Bar", "Museum"]}], "top_spots": [], "vibe": ["Lively"],
+            "why": "X scores 80/100 taste affinity with your profile. Strongest pull: A (90). Known for: beaches. "
+                   "Start in Old Town: spots like Cafe, Bar, Museum match your taste. Local vibe: lively."}
+    assert run_eval.claims_backed(city)[2] == []
+    city["why"] = city["why"].replace("A (90)", "A (99)").replace("beaches", "skiing")
+    assert set(run_eval.claims_backed(city)[2]) == {"driver A", "city tag"}

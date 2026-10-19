@@ -1,0 +1,22 @@
+[
+ {"id": "indie_creative", "profile": {"music": "Radiohead, Bon Iver", "films": "Amelie, Lost in Translation", "food": "Blue Bottle Coffee", "lifestyle": "art, cafes, walkable"},
+  "perturbed": {"music": "Metallica, Slayer", "films": "Mad Max: Fury Road", "food": "Blue Bottle Coffee", "lifestyle": "art, cafes, walkable"}},
+ {"id": "foodie_nightlife", "profile": {"music": "Daft Punk, Bad Bunny", "tv": "The Bear", "food": "Nobu", "lifestyle": "nightlife, beaches"},
+  "perturbed": {"music": "Enya", "tv": "The Bear", "food": "Nobu", "lifestyle": "quiet, mountains"}},
+ {"id": "outdoorsy_family_us", "profile": {"music": "Coldplay, Taylor Swift", "films": "Up, Paddington", "lifestyle": "hiking, kids, nature", "country": "US"},
+  "perturbed": {"music": "Kendrick Lamar, Drake", "films": "Up, Paddington", "lifestyle": "nightlife, urban", "country": "US"}},
+ {"id": "jazz_bookworm", "profile": {"music": "Miles Davis, John Coltrane", "books": "Norwegian Wood, The Great Gatsby", "lifestyle": "jazz, bookstores"},
+  "perturbed": {"music": "Skrillex, Deadmau5", "books": "Norwegian Wood, The Great Gatsby", "lifestyle": "jazz, bookstores"}},
+ {"id": "kpop_anime", "profile": {"music": "BTS, Blackpink", "tv": "Attack on Titan", "films": "Spirited Away", "lifestyle": "shopping, urban"},
+  "perturbed": {"music": "Johnny Cash, Dolly Parton", "tv": "Yellowstone", "films": "Spirited Away", "lifestyle": "shopping, urban"}},
+ {"id": "country_ranch", "profile": {"music": "Johnny Cash, Dolly Parton", "tv": "Yellowstone", "brands": "Patagonia", "lifestyle": "outdoors, ranch", "country": "US"},
+  "perturbed": {"music": "Lady Gaga, Beyonce", "tv": "Sex and the City", "brands": "Patagonia", "lifestyle": "nightlife, fashion", "country": "US"}},
+ {"id": "latin_beach", "profile": {"music": "Shakira, Karol G", "food": "Starbucks", "lifestyle": "beaches, salsa"},
+  "perturbed": {"music": "Sigur Ros", "food": "Starbucks", "lifestyle": "snow, skiing"}},
+ {"id": "classical_history_eu", "profile": {"music": "Mozart, Beethoven", "films": "Amadeus", "books": "War and Peace", "lifestyle": "history, museums"},
+  "perturbed": {"music": "Travis Scott", "films": "Fast & Furious", "books": "War and Peace", "lifestyle": "history, museums"}},
+ {"id": "tech_minimalist", "profile": {"films": "The Social Network, Her", "brands": "Apple, Muji", "food": "Sweetgreen", "lifestyle": "startups, cycling"},
+  "perturbed": {"films": "The Godfather", "brands": "Harley-Davidson", "food": "Sweetgreen", "lifestyle": "startups, cycling"}},
+ {"id": "single_taste_edge", "profile": {"music": "Bad Bunny", "country": "PR"},
+  "perturbed": {"music": "ABBA", "country": "PR"}}
+]

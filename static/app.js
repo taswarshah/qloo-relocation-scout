@@ -66,6 +66,12 @@ function cityCard(city, index) {
   title.append(element("p", city.location, "muted"));
   header.append(title, scoreBadge(city.affinity));
   card.append(header, element("p", city.why, "city-explanation"));
+  const pick = element("label", null, "compare-toggle");
+  const box = document.createElement("input");
+  box.type = "checkbox"; box.dataset.index = String(index);
+  box.addEventListener("change", () => onPick(box));
+  pick.append(box, " Compare side by side");
+  card.append(pick);
   if (city.drivers?.length) {
     const drivers = element("div", null, "taste-drivers");
     drivers.append(element("h4", "Your strongest connections"));
@@ -91,8 +97,61 @@ function cityCard(city, index) {
   return card;
 }
 
+let shownCities = [];
+const picked = [];
+function onPick(box) {
+  const i = Number(box.dataset.index);
+  if (box.checked) { picked.push(i); if (picked.length > 2) { const drop = picked.shift(); const other = output.querySelector(`input[data-index="${drop}"]`); if (other) other.checked = false; } }
+  else { const at = picked.indexOf(i); if (at >= 0) picked.splice(at, 1); }
+  renderComparison();
+}
+
+function pct(x) { return Math.round(Math.min(1, Math.max(0, Number(x) || 0)) * 100); }
+
+function signals(city) { return new Set([...(city.city_tags || []), ...(city.vibe || [])].map(t => String(t).toLowerCase())); }
+
+function renderComparison() {
+  const slot = document.getElementById("comparison");
+  if (!slot) return;
+  if (picked.length < 2) {
+    slot.replaceChildren(element("p", picked.length ? "Pick one more city to compare." : "Tick “Compare side by side” on any two cities.", "muted"));
+    return;
+  }
+  const [a, b] = picked.map(i => shownCities[i]);
+  const table = element("table", null, "compare-table");
+  const cap = element("caption", "Side by side · real Qloo affinity scores (0–100), no blended score");
+  const head = element("tr"); head.append(element("th", ""), element("th", a.city), element("th", b.city));
+  const thead = element("thead"); thead.append(head);
+  const body = element("tbody");
+  const row = (label, va, vb) => { const tr = element("tr"); const th = element("th", label); th.scope = "row"; tr.append(th, element("td", va), element("td", vb)); body.append(tr); };
+  row("Overall taste affinity", `${pct(a.affinity)}`, `${pct(b.affinity)}`);
+  const ids = []; for (const d of [...(a.drivers || []), ...(b.drivers || [])]) if (!ids.find(x => x.id === d.id)) ids.push(d);
+  const score = (city, id) => { const d = (city.drivers || []).find(x => x.id === id); return d ? `${pct(d.affinity)}` : "–"; };
+  for (const d of ids.slice(0, 6)) row(`↳ ${d.taste}`, score(a, d.id), score(b, d.id));
+  const sa = signals(a), sb = signals(b);
+  const shared = [...sa].filter(x => sb.has(x)), onlyA = [...sa].filter(x => !sb.has(x)), onlyB = [...sb].filter(x => !sa.has(x));
+  row("Shared cultural signals", shared.join(", ") || "none", shared.join(", ") || "none");
+  row("Unique signals", onlyA.join(", ") || "none", onlyB.join(", ") || "none");
+  const hoods = c => (c.neighborhoods || []).length
+    ? c.neighborhoods.map(n => `${n.name} (${(n.spots || []).length})`).join(", ")
+    : (c.top_spots || []).length ? `No neighborhood labels · ${c.top_spots.length} top spots` : "No local evidence";
+  row("Neighborhood evidence (spots)", hoods(a), hoods(b));
+  const cov = c => { const v = c.coverage || {}; return `${v.places_relevant ?? 0}/${v.places_returned ?? 0} venues kept · ${v.tastes_scored ?? 0}/${v.tastes_total ?? 0} tastes scored · ${c.radius_km ?? "?"} km radius`; };
+  row("Data coverage", cov(a), cov(b));
+  table.append(cap, thead, body);
+  const wrap = element("div", null, "table-wrap"); wrap.append(table);
+  slot.replaceChildren(wrap);
+}
+
 function renderResults(result) {
   const fragment = document.createDocumentFragment();
+  picked.length = 0;
+  if (result.warning) {
+    const banner = element("div", null, "message warning-state");
+    banner.setAttribute("role", "alert");
+    banner.append(element("strong", "Partial results"), element("p", result.warning));
+    fragment.append(banner);
+  }
   const matched = element("div", null, "matched-panel");
   matched.append(element("h3", "Your taste, connected"));
   const names = (result.matched || []).map(taste => taste.name);
@@ -105,10 +164,30 @@ function renderResults(result) {
     fragment.append(narrative);
   }
   const cities = result.cities || [];
+  shownCities = cities.slice();
+  const cmp = result.compare;
+  if (cmp) {
+    const panel = element("section", null, "candidate-panel");
+    panel.append(element("h3", "Why not your city?"));
+    panel.append(element("p", cmp.error || cmp.verdict));
+    fragment.append(panel);
+  }
   if (cities.length) {
     const grid = element("div", null, "results-grid");
     cities.forEach((city, index) => grid.append(cityCard(city, index)));
+    if (cmp && cmp.city && !cities.some(c => c.city === cmp.city.city)) {
+      shownCities.push(cmp.city);
+      const card = cityCard(cmp.city, shownCities.length - 1);
+      card.classList.add("candidate-card");
+      card.querySelector(".eyebrow").textContent = "YOUR PICK";
+      grid.append(card);
+    }
     fragment.append(grid);
+    const compareSection = element("section", null, "comparison-section");
+    compareSection.append(element("h3", "Compare two cities"));
+    const slot = element("div"); slot.id = "comparison";
+    compareSection.append(slot);
+    fragment.append(compareSection);
   } else {
     const empty = element("div", null, "empty-state");
     empty.append(element("h3", "No city matches this time"), element("p", "Try different favorites, or remove the country limit to cast a wider net."));
@@ -119,9 +198,10 @@ function renderResults(result) {
   trace.append(element("summary", "Behind the shortlist · Agent trace"), element("pre", (result.trace || []).join("\n")));
   fragment.append(trace);
   output.replaceChildren(fragment);
+  renderComparison();
 }
 
-const FIELDS = ["music", "films", "tv", "books", "food", "brands", "lifestyle", "country"];
+const FIELDS = ["music", "films", "tv", "books", "food", "brands", "lifestyle", "country", "compare"];
 
 function shareUrl(profile) {
   const params = new URLSearchParams();
@@ -133,7 +213,7 @@ let lastProfile = {};
 function shareBar(result) {
   const bar = element("div", null, "share-bar");
   const timing = result.timings;
-  if (timing) bar.append(element("p", `Scouted in ${(timing.total_ms / 1000).toFixed(1)} s · ${timing.qloo_calls} live Qloo calls · ${timing.cache_hits} cached`, "muted"));
+  if (timing) bar.append(element("p", `Scouted in ${(timing.total_ms / 1000).toFixed(1)} s · ${timing.qloo_calls} live Qloo calls · ${timing.cache_hits} cached${timing.qloo_failed ? ` · ${timing.qloo_failed} failed` : ""}`, "muted"));
   const button = element("button", "Copy shareable link", "secondary-button");
   button.type = "button";
   button.addEventListener("click", async () => {
@@ -205,7 +285,7 @@ form.addEventListener("submit", async event => {
   let any = false;
   for (const name of FIELDS) {
     const value = params.get(name);
-    if (value) { form.elements[name].value = value.slice(0, name === "country" ? 2 : 400); any = true; }
+    if (value) { form.elements[name].value = value.slice(0, name === "country" ? 2 : name === "compare" ? 60 : 400); any = true; }
   }
   if (any) form.requestSubmit();
 })();

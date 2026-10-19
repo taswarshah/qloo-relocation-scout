@@ -27,10 +27,32 @@ pytest -q tests/test_app.py   # offline tests, Qloo mocked
 Or with Docker: `docker build -t scout . && docker run -p 8080:8080 --env-file .env scout`
 
 ## Performance
-Three parallel rounds of Qloo calls (resolve, then rank and attribute, then neighborhoods). Bounded concurrency (`QLOO_CONCURRENCY`, default 4), a pooled keep-alive HTTP client, a short capped 429 backoff, and a private in-memory TTL cache (`QLOO_CACHE_TTL_S`, `QLOO_CACHE_MAX`). Measured on 3 personas × 2 runs with a cold cache: p50 4.3 s, max 5.7 s (before: p50 6.5 s, max 7.9 s). Cached repeats take under 50 ms. Every response includes a `timings` object.
+Three parallel rounds of Qloo calls (resolve, then rank and attribute, then neighborhoods). Bounded concurrency (`QLOO_CONCURRENCY`, default 6), a pooled keep-alive HTTP client, a short capped 429 backoff, and a private in-memory TTL cache (`QLOO_CACHE_TTL_S`, `QLOO_CACHE_MAX`). Measured with a cold cache across the 10 eval personas: p50 4.1 s, max 5.7 s (original version: p50 6.5 s, max 7.9 s on 3 personas). Cached repeats take under 50 ms. Every response includes a `timings` object.
 
 ## Data quality
 Neighborhood names are cleaned of administrative prefixes. Venues whose address or geocode contradicts the city or country are dropped (US territories count as US). Destinations within 30 km of each other are merged. Amenity, numeric and COVID-era tags are filtered out of the vibe. Cities without neighborhood labels fall back to top taste-matched spots.
+
+
+## Screenshots
+| Desktop | Mobile |
+|---|---|
+| ![Home](docs/screenshots/desktop-home.png) | ![Mobile home](docs/screenshots/mobile-home.png) |
+
+Screenshots of results and the comparison view contain Qloo response data, so they're kept out of the repo (Qloo's hackathon terms) and attached to the Devpost submission instead. Regenerate them locally with `tests/ui/browser_check.py`.
+
+## Features added in round 3
+- **Compare two cities side by side:** tick any two result cards, including "your pick", to see real Qloo numbers only (no blended score): overall affinity, per-taste affinities, shared and unique cultural signals, neighborhood evidence and data coverage.
+- **"Why not my city?":** enter a city you're already considering. It's scored on the same signals via `filter.results.entities`, and the agent explains the gap taste by taste.
+- **Exact attribution:** per-taste affinities are fetched for exactly the shown cities (`filter.results.entities`), keyed by Qloo entity ID.
+- **Coordinates instead of names for local venues:** `filter.location=POINT(lon lat)` + `filter.location.radius` (15 km, widening to 60 km for thin data). A name like "Flores" otherwise resolves to a Buenos Aires barrio.
+- **Relevance filter:** hotels, schools, offices, gas stations, transit and address-like names are dropped using Qloo category tags. Spots are ranked by taste affinity.
+- **Failure transparency:** per-endpoint counters (ok, retries, timeouts, HTTP errors, rate-limited). Responses carry `health.partial` and a safe warning shown in the UI, and an upstream outage returns 503 rather than "no matches".
+
+## Evaluation
+`python eval/run_eval.py` runs 10 synthetic personas (plus a perturbed version of each) against live Qloo and writes aggregate metrics to [eval/RESULTS.md](eval/RESULTS.md): coverage, relevance proxies, automated explanation grounding, sensitivity and latency. A `baseline()` hook is left for a future non-Qloo baseline.
+
+## UI check
+`python tests/ui/browser_check.py` (Playwright and Chrome, localhost only) loads the page, runs a persona with a comparison, fails on any console, CSP or HTTP error, and regenerates the screenshots.
 
 ## Notes
 - Qloo responses are cached in memory only. No Qloo data is stored in this repo, as the hackathon terms require.

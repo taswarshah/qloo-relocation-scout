@@ -144,4 +144,22 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .75rem; line-he
 .driver-score { text-align: right; font-variant-numeric: tabular-nums; }
 .share-bar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: .75rem; margin: 1.25rem 0; }
 .secondary-button { padding: .55rem 1rem; border-radius: 999px; border: 1px solid currentColor; background: transparent; color: inherit; cursor: pointer; font: inherit; }
-.secondary-button:focus-visible { outline: 3px solid #7c5cff; outline-offset: 2px; }
+.secondary-button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+/* Round 3: comparison, candidate, warnings (uses the site palette) */
+.compare-toggle { display: inline-flex; align-items: center; gap: .45rem; margin: .5rem 0; font-size: .9rem; cursor: pointer; color: var(--ink); }
+.compare-toggle input { width: 1.1rem; height: 1.1rem; accent-color: var(--accent); }
+.comparison-section, .candidate-panel { margin: 1.5rem 0; padding: 1.25rem; border-radius: 14px; border: 1px solid var(--line); background: #fff; color: var(--ink); }
+.candidate-panel { background: var(--soft); }
+.candidate-card { outline: 2px dashed var(--accent); outline-offset: -2px; }
+.table-wrap { overflow-x: auto; }
+.compare-table { width: 100%; border-collapse: collapse; font-size: .92rem; color: var(--ink); }
+.compare-table caption { text-align: left; color: var(--muted); padding-bottom: .5rem; }
+.compare-table th, .compare-table td { padding: .55rem .6rem; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+.compare-table thead th { font-size: 1rem; color: var(--accent); }
+.compare-table tbody th { font-weight: 600; width: 28%; }
+.compare-table td { font-variant-numeric: tabular-nums; }
+.warning-state { border-left: 4px solid #b7791f; background: #fff8e6; color: #5c4210; padding: .9rem 1rem; border-radius: 10px; margin-bottom: 1rem; }
+.secondary-button:focus-visible { outline-color: var(--accent); }
+.driver-bars meter { accent-color: var(--accent); }
+@media (max-width: 640px) { .compare-table { font-size: .82rem; } .compare-table tbody th { width: 34%; } }
