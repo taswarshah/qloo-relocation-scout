@@ -1,17 +1,75 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Relocation Scout · Qloo-powered</title>
-<link rel="stylesheet" href="/static/style.css"></head><body>
-<h1>🧭 Relocation Scout</h1><p class="sub">Tell it what you love. It finds cities & neighborhoods that share your taste, using Qloo's cross-domain taste graph.</p>
-<div class="presets">Try: <button type="button" data-preset="0">Indie creative</button><button type="button" data-preset="1">Foodie & nightlife</button><button type="button" data-preset="2">Outdoorsy family (US)</button></div>
-<form id="f">
-<label>Music (artists)</label><input name="music" maxlength="400" placeholder="Radiohead, Bon Iver">
-<label>Films</label><input name="films" maxlength="400" placeholder="Amélie, Lost in Translation">
-<label>TV shows</label><input name="tv" maxlength="400" placeholder="The Bear">
-<label>Books</label><input name="books" maxlength="400" placeholder="Norwegian Wood">
-<label>Favorite restaurants / cafés</label><input name="food" maxlength="400" placeholder="Blue Bottle Coffee">
-<label>Brands</label><input name="brands" maxlength="400" placeholder="Patagonia">
-<label>Lifestyle (keywords)</label><input name="lifestyle" maxlength="400" placeholder="walkable, art, nightlife, hiking">
-<label>Limit to country (optional ISO code)</label><input name="country" placeholder="US, PT, DE…" maxlength="2" pattern="[A-Za-z]{2}">
-<button type="submit">Scout cities</button></form>
-<div id="out"></div>
-<script src="/static/app.js"></script><p class="small">Powered by Qloo Taste AI™ (Insights API). Not affiliated with Qloo.</p></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Find cities and neighborhoods that share your taste with Relocation Scout, powered by Qloo.">
+  <title>Relocation Scout · Find your kind of city</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#profile">Skip to your taste profile</a>
+  <header class="site-header shell">
+    <a class="brand" href="/" aria-label="Relocation Scout home"><span class="brand-icon" aria-hidden="true">↗</span> Relocation Scout</a>
+    <span class="powered">Powered by Qloo Taste AI</span>
+  </header>
+  <main class="shell">
+    <section class="hero" aria-labelledby="hero-title">
+      <div>
+        <p class="eyebrow">A different way to find home</p>
+        <h1 id="hero-title">Your next city.<br><span>Your kind of life.</span></h1>
+        <p class="hero-copy">The music you replay. The cafés you love. The stories that stay with you. Turn your taste into a shortlist of places that feel like you.</p>
+        <a class="text-link" href="#profile">Build your taste profile <span aria-hidden="true">↓</span></a>
+      </div>
+      <aside class="how-it-works" aria-label="How scouting works">
+        <p class="eyebrow">From taste to place</p>
+        <ol>
+          <li><strong>Share what you love</strong><span>Artists, stories, food and everyday rituals.</span></li>
+          <li><strong>Connect the dots</strong><span>Qloo’s taste graph finds cultural affinity.</span></li>
+          <li><strong>Explore your shortlist</strong><span>Cities, local spots and the reasons why.</span></li>
+        </ol>
+      </aside>
+    </section>
+
+    <section id="profile" class="profile-section" aria-labelledby="profile-title">
+      <div class="section-heading"><div><p class="eyebrow">01 / Your taste</p><h2 id="profile-title">What makes a place yours?</h2></div><p>Start with a few favorites. Every field is optional.</p></div>
+      <div class="presets" aria-label="Example taste profiles">
+        <span>Need inspiration?</span>
+        <button type="button" data-preset="0">Indie creative</button>
+        <button type="button" data-preset="1">Foodie &amp; nightlife</button>
+        <button type="button" data-preset="2">Outdoorsy family · US</button>
+      </div>
+      <form id="f" aria-describedby="form-help">
+        <p id="form-help" class="form-help">Use specific names, separated by commas. Up to 5 items per field; the first 12 favorites inform your search.</p>
+        <div class="form-grid">
+          <fieldset class="form-card">
+            <legend>Culture &amp; stories</legend>
+            <label for="music">Music <span>artists</span></label><input id="music" name="music" maxlength="400" placeholder="Radiohead, Bon Iver">
+            <label for="films">Films</label><input id="films" name="films" maxlength="400" placeholder="Amélie, Lost in Translation">
+            <label for="tv">TV shows</label><input id="tv" name="tv" maxlength="400" placeholder="The Bear">
+            <label for="books">Books</label><input id="books" name="books" maxlength="400" placeholder="Norwegian Wood">
+          </fieldset>
+          <fieldset class="form-card">
+            <legend>Everyday life</legend>
+            <label for="food">Restaurants &amp; cafés</label><input id="food" name="food" maxlength="400" placeholder="Blue Bottle Coffee, Nobu">
+            <label for="brands">Brands</label><input id="brands" name="brands" maxlength="400" placeholder="Patagonia">
+            <label for="lifestyle">Lifestyle <span>keywords</span></label><input id="lifestyle" name="lifestyle" maxlength="400" placeholder="walkable, art, nightlife, hiking">
+            <label for="country">Country <span>optional</span></label><input id="country" name="country" placeholder="US" maxlength="2" pattern="[A-Za-z]{2}" aria-describedby="country-help" autocapitalize="characters"><p id="country-help" class="input-help">Two-letter country code, e.g. US, PT or DE. Leave blank to explore globally.</p>
+          </fieldset>
+        </div>
+        <div class="form-actions"><p>Cultural affinity, not a cost-of-living ranking.</p><button id="submit" class="primary-button" type="submit">Find my cities <span aria-hidden="true">↗</span></button></div>
+      </form>
+    </section>
+
+    <section class="results-section" aria-labelledby="results-title">
+      <div class="section-heading"><div><p class="eyebrow">02 / Your next chapter</p><h2 id="results-title">A shortlist with a story</h2></div></div>
+      <div id="loading" class="loading-state" role="status" hidden><span class="spinner" aria-hidden="true"></span><div><strong>Connecting your taste to places…</strong><p>Resolving favorites, comparing cities and finding local spots. Usually about 5 seconds.</p></div></div>
+      <div id="out" aria-live="polite" aria-busy="false">
+        <div class="empty-state"><span class="empty-icon" aria-hidden="true">◎</span><h3>There’s a place for your kind of life.</h3><p>Add a few favorites above, or try an example profile. Your city matches will appear here.</p></div>
+      </div>
+    </section>
+  </main>
+  <footer class="site-footer shell"><div><strong>Relocation Scout</strong><p>Built for the Qloo Agentic Hackathon.</p></div><p>Powered by Qloo Taste AI™ · Not affiliated with Qloo.<br>A starting point for exploration, not relocation advice.</p></footer>
+</body>
+</html>
