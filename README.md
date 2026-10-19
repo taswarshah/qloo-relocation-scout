@@ -20,7 +20,9 @@ python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env   # add your Qloo hackathon key
 uvicorn app:app --port 8077   # open http://localhost:8077
-python test_personas.py       # 3 sample personas end-to-end
+ENV=development uvicorn app:app --port 8077   # enables /docs locally
+python tests/live_personas.py # 3 sample personas end-to-end (live Qloo)
+pytest -q tests/test_app.py   # offline tests, Qloo mocked
 ```
 Or with Docker: `docker build -t scout . && docker run -p 8080:8080 --env-file .env scout`
 
@@ -28,6 +30,9 @@ Or with Docker: `docker build -t scout . && docker run -p 8080:8080 --env-file .
 - Qloo responses are cached in memory only. No Qloo data is stored in this repo, as the hackathon terms require.
 - Requests are rate-limited (semaphore plus 429 backoff).
 - Third-party credits: Qloo Insights API, FastAPI, httpx.
+
+## Security
+See [SECURITY.md](SECURITY.md): input limits, rate limiting, CSP, no secrets or Qloo data in the repo, and CI running pytest, pip-audit, bandit and gitleaks.
 
 ## License
 MIT

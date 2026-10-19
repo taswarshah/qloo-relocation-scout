@@ -20,7 +20,7 @@ CATEGORY_TYPES = {
 
 class Qloo:
     def __init__(self):
-        self.c = httpx.AsyncClient(base_url=BASE, headers={"X-Api-Key": KEY}, timeout=20)
+        self.c = httpx.AsyncClient(base_url=BASE, headers={"X-Api-Key": KEY}, timeout=httpx.Timeout(10.0, connect=5.0))
         self.cache = {}
     async def get(self, path, params):
         k = (path, tuple(sorted(params.items())))
@@ -50,12 +50,19 @@ VIBE_STOP = {"place","morning","afternoon","evening","night","routine visit","co
 
 NOISE = re.compile(r"^(place|morning|afternoon|evening|night|routine visit|commercial|destination|locals|takeout|delivery|dine in|curbside.*|.*accessible.*|.*card.*|.*parking.*|cash.*|\d.*|restroom.*|wi-?fi.*|nfc.*)$")
 
-def split(s): return [x.strip() for x in re.split(r"[,;\n]", s or "") if x.strip()]
+MAX_ITEMS_PER_FIELD = 5
+MAX_ENTITIES = 12
+MAX_TAGS = 5
+
+def split(s):
+    """Split a comma list, drop control chars, cap item count and length."""
+    items = [re.sub(r"[\x00-\x1f\x7f]", "", x).strip()[:80] for x in re.split(r"[,;\n]", s or "")]
+    return [x for x in items if x][:MAX_ITEMS_PER_FIELD]
 
 async def resolve_profile(q, profile, trace):
     """Step 1: resolve free-text likes to Qloo entity IDs and lifestyle words to tag IDs."""
     entities, tags = [], []
-    jobs = [(cat, name) for cat, typ in CATEGORY_TYPES.items() for name in split(profile.get(cat, ""))]
+    jobs = [(cat, name) for cat, typ in CATEGORY_TYPES.items() for name in split(profile.get(cat, ""))][:MAX_ENTITIES]
     found = await asyncio.gather(*[q.search(n, CATEGORY_TYPES[c]) for c, n in jobs])
     for (cat, name), e in zip(jobs, found):
         if e:
@@ -63,7 +70,7 @@ async def resolve_profile(q, profile, trace):
             trace.append(f"search: '{name}' → {e['name']} ({cat})")
         else:
             trace.append(f"search: '{name}' → no match")
-    for word in split(profile.get("lifestyle", "")):
+    for word in split(profile.get("lifestyle", ""))[:MAX_TAGS]:
         ts = await q.tags(word)
         pick = next((t for t in ts if "destination" in t["id"]), None) or (ts[0] if ts else None)
         if pick:
@@ -72,7 +79,14 @@ async def resolve_profile(q, profile, trace):
     return entities, tags
 
 async def scout(profile: dict, n_cities: int = 4) -> dict:
-    q, trace = Qloo(), []
+    q = Qloo()
+    try:
+        return await _scout(q, profile, n_cities)
+    finally:
+        await q.c.aclose()
+
+async def _scout(q, profile: dict, n_cities: int) -> dict:
+    trace = []
     entities, tags = await resolve_profile(q, profile, trace)
     if not entities and not tags:
         return {"error": "Couldn't match any of your tastes in Qloo. Try specific artists, films or restaurants.", "trace": trace}
@@ -129,7 +143,6 @@ async def scout(profile: dict, n_cities: int = 4) -> dict:
     trace.append(f"insights(place, filter.location.query=city) x{len(results)} for neighborhoods")
     for r in results: r["why"] = explain(r, tags)
     narrative = await llm_summary(profile, results)
-    await q.c.aclose()
     return {"matched": entities, "lifestyle_tags": tags, "cities": results, "narrative": narrative, "trace": trace}
 
 def explain(r, tags):
@@ -156,5 +169,5 @@ async def llm_summary(profile, results):
             r = await c.post(f"{base.rstrip('/')}/chat/completions", headers={"Authorization": f"Bearer {key}"},
                              json={"model": model, "messages": [{"role": "user", "content": msg}]})
             return r.json()["choices"][0]["message"]["content"]
-    except Exception as e:
+    except (httpx.HTTPError, KeyError, IndexError, ValueError):
         return None

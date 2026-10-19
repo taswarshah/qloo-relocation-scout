@@ -1,5 +1,10 @@
 .env
+.env.*
+!.env.example
 __pycache__/
 *.pyc
 .venv/
 cache/
+*.json.cache
+qloo_responses/
+.pytest_cache/

@@ -1,0 +1,8 @@
+body{font-family:system-ui,sans-serif;max-width:900px;margin:auto;padding:1rem;background:#0f1115;color:#e8e8e8}
+h1{margin-bottom:0}.sub{color:#9aa}label{display:block;margin-top:.6rem;font-weight:600}
+input{width:100%;padding:.5rem;border-radius:6px;border:1px solid #333;background:#181b22;color:#eee}
+button{margin-top:1rem;padding:.7rem 1.4rem;border:0;border-radius:6px;background:#7c5cff;color:#fff;font-size:1rem;cursor:pointer}
+.card{background:#181b22;border:1px solid #2a2e38;border-radius:10px;padding:1rem;margin:1rem 0}
+.score{float:right;font-size:1.4rem;color:#7c5cff}.chip{display:inline-block;background:#262a35;border-radius:12px;padding:2px 9px;margin:2px;font-size:.85rem}
+details{color:#9aa;font-size:.85rem}.presets button{background:#262a35;font-size:.85rem;padding:.4rem .8rem;margin-right:.4rem}
+.small{color:#9aa;margin-top:2rem;font-size:.8rem}

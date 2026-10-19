@@ -1,43 +1,17 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Relocation Scout · Qloo-powered</title>
-<style>
-body{font-family:system-ui,sans-serif;max-width:900px;margin:auto;padding:1rem;background:#0f1115;color:#e8e8e8}
-h1{margin-bottom:0}.sub{color:#9aa}label{display:block;margin-top:.6rem;font-weight:600}
-input{width:100%;padding:.5rem;border-radius:6px;border:1px solid #333;background:#181b22;color:#eee}
-button{margin-top:1rem;padding:.7rem 1.4rem;border:0;border-radius:6px;background:#7c5cff;color:#fff;font-size:1rem;cursor:pointer}
-.card{background:#181b22;border:1px solid #2a2e38;border-radius:10px;padding:1rem;margin:1rem 0}
-.score{float:right;font-size:1.4rem;color:#7c5cff}.chip{display:inline-block;background:#262a35;border-radius:12px;padding:2px 9px;margin:2px;font-size:.85rem}
-details{color:#9aa;font-size:.85rem}.presets button{background:#262a35;font-size:.85rem;padding:.4rem .8rem;margin-right:.4rem}
-</style></head><body>
+<link rel="stylesheet" href="/static/style.css"></head><body>
 <h1>🧭 Relocation Scout</h1><p class="sub">Tell it what you love. It finds cities & neighborhoods that share your taste, using Qloo's cross-domain taste graph.</p>
-<div class="presets">Try: <button onclick="preset(0)">Indie creative</button><button onclick="preset(1)">Foodie & nightlife</button><button onclick="preset(2)">Outdoorsy family (US)</button></div>
+<div class="presets">Try: <button type="button" data-preset="0">Indie creative</button><button type="button" data-preset="1">Foodie & nightlife</button><button type="button" data-preset="2">Outdoorsy family (US)</button></div>
 <form id="f">
-<label>Music (artists)</label><input name="music" placeholder="Radiohead, Bon Iver">
-<label>Films</label><input name="films" placeholder="Amélie, Lost in Translation">
-<label>TV shows</label><input name="tv" placeholder="The Bear">
-<label>Books</label><input name="books" placeholder="Norwegian Wood">
-<label>Favorite restaurants / cafés</label><input name="food" placeholder="Blue Bottle Coffee">
-<label>Brands</label><input name="brands" placeholder="Patagonia">
-<label>Lifestyle (keywords)</label><input name="lifestyle" placeholder="walkable, art, nightlife, hiking">
-<label>Limit to country (optional ISO code)</label><input name="country" placeholder="US, PT, DE…" maxlength="2">
+<label>Music (artists)</label><input name="music" maxlength="400" placeholder="Radiohead, Bon Iver">
+<label>Films</label><input name="films" maxlength="400" placeholder="Amélie, Lost in Translation">
+<label>TV shows</label><input name="tv" maxlength="400" placeholder="The Bear">
+<label>Books</label><input name="books" maxlength="400" placeholder="Norwegian Wood">
+<label>Favorite restaurants / cafés</label><input name="food" maxlength="400" placeholder="Blue Bottle Coffee">
+<label>Brands</label><input name="brands" maxlength="400" placeholder="Patagonia">
+<label>Lifestyle (keywords)</label><input name="lifestyle" maxlength="400" placeholder="walkable, art, nightlife, hiking">
+<label>Limit to country (optional ISO code)</label><input name="country" placeholder="US, PT, DE…" maxlength="2" pattern="[A-Za-z]{2}">
 <button type="submit">Scout cities</button></form>
 <div id="out"></div>
-<script>
-const P=[{music:"Radiohead, Bon Iver",films:"Amelie, Lost in Translation",food:"Blue Bottle Coffee",lifestyle:"art, cafes, walkable"},
-{music:"Daft Punk, Bad Bunny",tv:"The Bear",food:"Nobu",lifestyle:"nightlife, beaches"},
-{music:"Coldplay, Taylor Swift",films:"Up, Paddington",lifestyle:"hiking, kids, nature",country:"US"}];
-const f=document.getElementById('f'),out=document.getElementById('out');
-function preset(i){for(const el of f.elements)if(el.name)el.value=P[i][el.name]||""}
-const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-f.onsubmit=async e=>{e.preventDefault();out.innerHTML="<p>🔎 Agent is resolving your tastes and querying Qloo… (~15s)</p>";
- const body=Object.fromEntries(new FormData(f));
- try{const r=await (await fetch('/api/scout',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
- if(r.error){out.innerHTML=`<p>${esc(r.error)}</p>`;return}
- let h=`<p>Matched in Qloo: ${r.matched.map(m=>`<span class=chip>${esc(m.name)}</span>`).join('')}${r.lifestyle_tags.map(t=>`<span class=chip>#${esc(t.name)}</span>`).join('')}</p>`;
- if(r.narrative)h+=`<div class=card>${esc(r.narrative)}</div>`;
- for(const c of r.cities){h+=`<div class=card><span class=score>${Math.round(c.affinity*100)}</span><h2>${esc(c.location)}</h2><p>${esc(c.why)}</p>
- ${c.neighborhoods.map(n=>`<p><b>${esc(n.name)}</b>: ${n.spots.map(esc).join(' · ')}</p>`).join('')}
- <p>${c.vibe.map(v=>`<span class=chip>${esc(v)}</span>`).join('')}</p></div>`}
- h+=`<details><summary>Agent trace (Qloo calls)</summary><pre>${esc(r.trace.join('\n'))}</pre></details>`;out.innerHTML=h;
- }catch(err){out.innerHTML="<p>Something went wrong. Try again.</p>"}};
-</script><p class="sub" style="margin-top:2rem;font-size:.8rem">Powered by Qloo Taste AI™ (Insights API). Not affiliated with Qloo.</p></body></html>
+<script src="/static/app.js"></script><p class="small">Powered by Qloo Taste AI™ (Insights API). Not affiliated with Qloo.</p></body></html>
