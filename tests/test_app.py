@@ -723,3 +723,58 @@ def test_429_waits_for_qloo_reset_header(monkeypatch):
     assert found["entity_id"] == "e1" and q.stats["/search"]["retries"] == 1 and q.failed == 0
     assert any(abs(d - 0.15) < 1e-6 for d in slept)  # reset 0.1 s + 50 ms margin, not a blind backoff
     agent._CACHE.clear()
+
+
+def _region_dest(name, cc, region, lat, lon):
+    d = _dest(name, cc, lat, lon)
+    d["properties"]["geocode"]["admin1_region"] = region
+    return d
+
+
+def test_shortlist_spreads_across_regions_and_countries():
+    ranked = [_region_dest("Reykjavik", "IS", "Capital", 64.1, -21.9),
+              _region_dest("Pittsburgh", "US", "Pennsylvania", 40.4, -80.0),
+              _region_dest("Lancaster", "US", "Pennsylvania", 40.0, -76.3),
+              _region_dest("Scranton", "US", "Pennsylvania", 41.4, -75.7),
+              _region_dest("Portland", "US", "Oregon", 45.5, -122.7),
+              _region_dest("Asheville", "US", "North Carolina", 35.6, -82.6),
+              _region_dest("Edinburgh", "GB", "Scotland", 55.9, -3.2)]
+    names = [c["name"] for c in agent.unique_cities(ranked, 4)]
+    assert names == ["Reykjavik", "Pittsburgh", "Portland", "Edinburgh"]  # 1 per state, 2 per country, rank order kept
+    # A country filter means "only the US": still one per state, no per-country cap.
+    us = [c["name"] for c in agent.unique_cities(ranked[1:6], 3, max_per_country=None)]
+    assert us == ["Pittsburgh", "Portland", "Asheville"]
+
+
+def test_diversity_never_shrinks_the_shortlist():
+    same_state = [_region_dest(n, "US", "Pennsylvania", 40 + i, -76 - i) for i, n in enumerate(["A", "B", "C", "D"])]
+    assert [c["name"] for c in agent.unique_cities(same_state, 4)] == ["A", "B", "C", "D"]
+
+
+def test_lodging_without_categories_is_filtered_by_name():
+    p = lambda name: {"name": name, "tags": []}
+    assert not agent.is_relevant_place(p("Kimpton Hotel Monaco Pittsburgh"))
+    assert agent.is_relevant_place(p("Kex Hostel Restaurant")) and agent.is_relevant_place(p("Hotel Bar Rooftop"))
+    assert agent.is_relevant_place(p("Wood Street Galleries"))
+
+
+def test_amenity_tags_are_not_vibe():
+    for junk in ("Dining drinking", "Full bar", "Bar", "Tourist attraction", "Outdoor seating"):
+        assert agent.vibe_tag({"name": junk}) is None
+    assert agent.vibe_tag({"name": "Historic"}) == "Historic"
+
+
+def test_location_label_reveals_where_qloo_places_a_city():
+    assert agent.location_label("Billund", {"name": "Post Falls", "admin1_region": "Idaho", "country_code": "US"}) == \
+        "Billund, Idaho US · near Post Falls"
+    assert agent.location_label("Solvang", {"name": "Solvang", "admin1_region": "California", "country_code": "US"}) == \
+        "Solvang, California US"
+    assert agent.location_label("Haleiwa", {"name": "Hale'iwa", "admin1_region": "Hawaii", "country_code": "US"}) == "Haleiwa, Hawaii US"
+    assert agent.location_label("Lisbon", {"country_code": "PT"}) == "Lisbon, PT"
+
+
+def test_hotel_with_only_lodging_categories_is_dropped():
+    p = {"name": "Kimpton Hotel Monaco", "tags": [{"name": "Lodging", "type": "urn:tag:category:place"}]}
+    assert not agent.is_relevant_place(p)
+    bar = {"name": "Hotel Monaco", "tags": [{"name": "Cocktail bar", "type": "urn:tag:category:place"}]}
+    assert agent.is_relevant_place(bar)

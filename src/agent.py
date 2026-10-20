@@ -279,7 +279,9 @@ class Qloo:
 
 NOISE = re.compile(r"^(place|morning|afternoon|evening|night|routine visit|commercial|destination|locals|takeout|delivery|dine in|curbside.*|.*accessible.*|.*card.*|.*parking.*|cash.*|\d.*|restroom.*|wi-?fi.*|nfc.*)$")
 
-VIBE_JUNK = re.compile(r"midday|convenience|delivery|disinfect|contact|mask|staff|sanitiz|temperature|alcohol|reservation|payment|credit|debit|wheelchair|restroom|parking|checks?$|dine-?in")
+VIBE_JUNK = re.compile(r"midday|convenience|delivery|disinfect|contact|mask|staff|sanitiz|temperature|alcohol|reservation|payment|credit|debit|wheelchair|restroom|parking|checks?$|dine-?in"
+                       r"|dining drinking|full bar|^bars?$|tourist attraction|outdoor seating|good for|^restaurant$"
+                       r"|onsite|free admission|^moderate$|^inexpensive$|^expensive$")
 
 MAX_ITEMS_PER_FIELD = 5
 MAX_ENTITIES = 12
@@ -400,6 +402,8 @@ def place_categories(place: QlooEntity) -> list[str]:
             if "category" in (tag.get("type") or "") or "category" in (tag.get("id") or "")]
 
 
+LODGING_NAME = re.compile(r"\b(hotel|motel|inn|suites|resort|lodge|apartments?)\b", re.IGNORECASE)
+HOSPITALITY_NAME = re.compile(r"\b(bar|restaurant|caf[eé]|kitchen|lounge|bistro|brasserie|pub|grill|rooftop)\b", re.IGNORECASE)
 ADDRESS_LIKE = re.compile(r"^\d|#|\b(calle|avenida|street|st\.|road|rd\.)\s*\d", re.IGNORECASE)
 
 
@@ -408,9 +412,13 @@ def is_relevant_place(place: QlooEntity) -> bool:
 
     Kept if any category is relevant (e.g. a hotel that is also a 'Bar' or 'Restaurant').
     """
-    if ADDRESS_LIKE.search(place.get("name") or ""):
+    name = place.get("name") or ""
+    if ADDRESS_LIKE.search(name):
         return False
     categories = [normalize(c) for c in place_categories(place) if c]
+    # Lodging by name ("Kimpton Hotel Monaco"), unless the name or a category says it's also a bar/restaurant.
+    if LODGING_NAME.search(name) and not (HOSPITALITY_NAME.search(name) or any(HOSPITALITY_NAME.search(c) for c in categories)):
+        return False
     if not categories:
         return True
     return any(not IRRELEVANT_CATEGORY.search(c) for c in categories)
@@ -536,7 +544,8 @@ async def _scout(q: Qloo, profile: dict[str, str], n_cities: int) -> ScoutResult
     else:
         destinations, cand_hits = await ranked, []
     trace.append(f"insights(destination, all signals) → {len(destinations)} candidates")
-    cities = unique_cities(destinations, n_cities)
+    # With a country filter the user asked for one country, so only spread across its regions.
+    cities = unique_cities(destinations, n_cities, max_per_country=None if country_filter else 2)
     cand_entity = cand_hits[0] if cand_hits else None
     if cand_entity:
         trace.append(f"insights(destination, filter.results.entities={cand_entity['name']}) → {pct(affinity(cand_entity))}/100")
@@ -708,8 +717,39 @@ def near(a: QlooEntity, b: QlooEntity, km: float = 30.0) -> bool:
     return 6371 * 2 * math.asin(math.sqrt(h)) < km
 
 
-def unique_cities(destinations: list[QlooEntity], limit: int) -> list[QlooEntity]:
-    """Keep the first destination per city/country pair in ranked input order."""
+def unique_cities(destinations: list[QlooEntity], limit: int, diverse: bool = True,
+                  max_per_country: int | None = 2) -> list[QlooEntity]:
+    """Distinct cities in ranked order, spread across regions so a shortlist offers real choices.
+
+    Near-duplicates (same name, or within 30 km in the same country) are always dropped. With
+    `diverse`, the first pass takes at most one city per state/region and `max_per_country` per
+    country; leftover slots are then filled in rank order, so diversity never shrinks the list.
+    """
+    candidates = _distinct(destinations)
+    if not diverse:
+        return candidates[:limit]
+    picked: list[QlooEntity] = []
+    regions: set[tuple[str | None, str | None]] = set()
+    per_country: Counter[str | None] = Counter()
+    for city in candidates:
+        geocode = (city.get("properties") or {}).get("geocode") or {}
+        country = COUNTRY_EQUIVALENTS.get(geocode.get("country_code"), geocode.get("country_code"))
+        region = (country, geocode.get("admin1_region"))
+        if (region[1] and region in regions) or (max_per_country and country and per_country[country] >= max_per_country):
+            continue
+        picked.append(city)
+        regions.add(region)
+        per_country[country] += 1
+        if len(picked) >= limit:
+            return picked
+    picked_ids = {id(c) for c in picked}
+    leftovers = [c for c in candidates if id(c) not in picked_ids]
+    ranked = {id(c): i for i, c in enumerate(candidates)}
+    return sorted(picked + leftovers[:limit - len(picked)], key=lambda c: ranked[id(c)])
+
+
+def _distinct(destinations: list[QlooEntity]) -> list[QlooEntity]:
+    """Keep the first destination per city/country pair, merging near-duplicates, in ranked order."""
     seen: set[tuple[str, str | None]] = set()
     cities: list[QlooEntity] = []
     for destination in destinations:
@@ -721,16 +761,27 @@ def unique_cities(destinations: list[QlooEntity], limit: int) -> list[QlooEntity
             continue
         seen.add(key)
         cities.append(destination)
-        if len(cities) >= limit:
-            break
     return cities
+
+
+def location_label(name: str, geocode: dict[str, Any]) -> str:
+    """Where Qloo's data places a destination. If its geocode names another town (a district of a
+    metro, or occasionally a misplaced entity such as "Billund" at Post Falls, Idaho), say so, because
+    the venues on the card come from those coordinates."""
+    region = " ".join(part for part in (geocode.get("admin1_region"), geocode.get("country_code")) if part)
+    town = geocode.get("name") or ""
+    a, b = (re.sub(r"[^\w ]", "", normalize(x)) for x in (name, town))  # "Hale'iwa" == "Haleiwa"
+    label = f"{name}, {region}".rstrip(", ")
+    if b and not (a in b or b in a or set(a.split()) & set(b.split())):
+        label += f" · near {town}"
+    return label
 
 
 def build_city(city: QlooEntity, found: tuple[list[QlooEntity], bool, int | None],
                per_taste: dict[str, dict[str, float]], entities: list[MatchedTaste] | None = None) -> CityResult:
     """Build one city card from destination affinity, per-taste attribution and local places."""
     geocode = (city.get("properties") or {}).get("geocode") or {}
-    location = f"{city['name']}, {geocode.get('admin1_region') or ''} {geocode.get('country_code') or ''}".strip()
+    location = location_label(city["name"], geocode)
     places, by_radius, radius_km = found
     neighborhoods, top_spots, vibe = summarize_places(places, city, by_radius)
     names = {e["id"]: e["name"] for e in entities or []}
