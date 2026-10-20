@@ -382,6 +382,11 @@ def vibe_tag(tag: QlooEntity) -> str | None:
     return name
 
 
+def pct(score: float) -> int:
+    """0-1 affinity as a 0-100 integer, rounded the same way the UI rounds it."""
+    return round(score * 100)
+
+
 def affinity(entity: QlooEntity) -> float:
     """Read the optional taste-affinity score, defaulting to zero."""
     return float((entity.get("query") or {}).get("affinity") or 0)
@@ -491,7 +496,7 @@ async def _scout(q: Qloo, profile: dict[str, str], n_cities: int) -> ScoutResult
     cities = unique_cities(destinations, n_cities)
     cand_entity = cand_hits[0] if cand_hits else None
     if cand_entity:
-        trace.append(f"insights(destination, filter.results.entities={cand_entity['name']}) → {int(affinity(cand_entity)*100)}/100")
+        trace.append(f"insights(destination, filter.results.entities={cand_entity['name']}) → {pct(affinity(cand_entity))}/100")
     t2 = time.perf_counter()
 
     # Round 3 (all parallel): exact per-taste affinity for exactly the shown cities via
@@ -639,12 +644,12 @@ def compare(name: str, cand: CityResult | None, top: CityResult | None,
     if cand["city"] == top["city"]:
         verdict = f"{cand['city']} is already your top pick."
     elif gap <= 0:
-        verdict = f"{cand['city']} matches your taste as well as {top['city']} ({int(cand['affinity']*100)} vs {int(top['affinity']*100)})."
+        verdict = f"{cand['city']} matches your taste as well as {top['city']} ({pct(cand['affinity'])} vs {pct(top['affinity'])})."
     else:
         losers = sorted((r for r in rows if r["top_pick"] > r["candidate"]), key=lambda r: r["candidate"] - r["top_pick"])[:2]
-        why = (" The biggest gaps: " + ", ".join(f"{r['taste']} ({int(r['candidate']*100)} vs {int(r['top_pick']*100)})" for r in losers) + ".") if losers else ""
-        verdict = (f"{cand['city']} scores {int(cand['affinity']*100)}/100, {int(round(gap*100))} points behind "
-                   f"{top['city']} ({int(top['affinity']*100)}).{why}")
+        why = (" The biggest gaps: " + ", ".join(f"{r['taste']} ({pct(r['candidate'])} vs {pct(r['top_pick'])})" for r in losers) + ".") if losers else ""
+        verdict = (f"{cand['city']} scores {pct(cand['affinity'])}/100, {pct(top['affinity']) - pct(cand['affinity'])} points behind "
+                   f"{top['city']} ({pct(top['affinity'])}).{why}")
     return {"city": cand, "top_pick": top["city"], "gap": gap, "rows": rows, "verdict": verdict}
 
 
@@ -741,9 +746,9 @@ async def find_places(q: Qloo, city: QlooEntity, signals: Parameters) -> tuple[l
 
 def explain(result: CityResult, tags: list[LifestyleTag]) -> str:
     """Rule-based explanation grounded only in Qloo data (works with no LLM)."""
-    parts = [f"{result['city']} scores {int(result['affinity']*100)}/100 taste affinity with your profile."]
+    parts = [f"{result['city']} scores {pct(result['affinity'])}/100 taste affinity with your profile."]
     if result["drivers"]:
-        parts.append("Strongest pull: " + ", ".join(f"{driver['taste']} ({int(driver['affinity']*100)})" for driver in result["drivers"][:3]) + ".")
+        parts.append("Strongest pull: " + ", ".join(f"{driver['taste']} ({pct(driver['affinity'])})" for driver in result["drivers"][:3]) + ".")
     if result["city_tags"]:
         parts.append("Known for: " + ", ".join(result["city_tags"][:3]).lower() + ".")
     if result["neighborhoods"]:

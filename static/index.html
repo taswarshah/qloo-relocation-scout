@@ -3,91 +3,174 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f8f8f2">
   <meta name="description" content="Find cities and neighborhoods that share your taste with Relocation Scout, powered by Qloo.">
   <title>Relocation Scout · Find your kind of city</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="preload" href="/static/fonts/manrope.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/static/fonts/dm-sans.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/app.js" defer></script>
 </head>
 <body>
+  <!-- Icon sprite (Lucide icons, ISC license). Inline SVG keeps the strict CSP. -->
+  <svg class="sprite" aria-hidden="true" focusable="false">
+    <symbol id="i-music" viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></symbol>
+    <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z"/></symbol>
+    <symbol id="i-film" viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="20" rx="2.2"/><path d="M7 2v20M17 2v20M2 12h20M2 7h5M2 17h5M17 17h5M17 7h5"/></symbol>
+    <symbol id="i-tv" viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="15" rx="2"/><path d="m17 2-5 5-5-5"/></symbol>
+    <symbol id="i-book" viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></symbol>
+    <symbol id="i-utensils" viewBox="0 0 24 24"><path d="M3 2v7c0 1.1.9 2 2 2h4a2 2 0 0 0 2-2V2"/><path d="M7 2v20"/><path d="M21 15V2a5 5 0 0 0-5 5v6c0 1.1.9 2 2 2h3Zm0 0v7"/></symbol>
+    <symbol id="i-tag" viewBox="0 0 24 24"><path d="M12 2H2v10l9.29 9.29c.94.94 2.48.94 3.42 0l6.58-6.58c.94-.94.94-2.48 0-3.42L12 2Z"/><path d="M7 7h.01"/></symbol>
+    <symbol id="i-person" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.5"/><path d="m9 20 3-6 3 6"/><path d="m6 8 6 2 6-2"/><path d="M12 10v4"/></symbol>
+    <symbol id="i-pin" viewBox="0 0 24 24"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></symbol>
+    <symbol id="i-heart" viewBox="0 0 24 24"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></symbol>
+    <symbol id="i-leaf" viewBox="0 0 24 24"><path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.48 19 2c1 2 2 4.18 2 8 0 5.5-4.78 10-10 10Z"/><path d="M2 21c0-3 1.85-5.36 5.08-6C9.5 14.52 12 13 13 12"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></symbol>
+    <symbol id="i-sparkles" viewBox="0 0 24 24"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></symbol>
+    <symbol id="i-chat" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></symbol>
+    <symbol id="i-palette" viewBox="0 0 24 24"><circle cx="13.5" cy="6.5" r=".8"/><circle cx="17.5" cy="10.5" r=".8"/><circle cx="8.5" cy="7.5" r=".8"/><circle cx="6.5" cy="12.5" r=".8"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.93 0 1.65-.75 1.65-1.69 0-.44-.18-.84-.44-1.13-.29-.29-.44-.65-.44-1.13a1.64 1.64 0 0 1 1.67-1.67h2c3.05 0 5.55-2.5 5.55-5.55C21.97 6.01 17.46 2 12 2z"/></symbol>
+    <symbol id="i-mountain" viewBox="0 0 24 24"><path d="m8 3 4 8 5-5 5 15H2L8 3z"/></symbol>
+    <symbol id="i-laptop" viewBox="0 0 24 24"><path d="M20 16V7a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v9m16 0H4m16 0 1.28 2.55a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45L4 16"/></symbol>
+  </svg>
+
   <a class="skip-link" href="#profile">Skip to your taste profile</a>
-  <header class="site-header shell">
-    <a class="brand" href="/" aria-label="Relocation Scout home"><span class="brand-icon" aria-hidden="true">↗</span> Relocation Scout</a>
-    <span class="powered">Powered by Qloo Taste AI</span>
-  </header>
-  <main class="shell">
-    <section class="hero" aria-labelledby="hero-title">
-      <div>
-        <p class="eyebrow">A different way to find home</p>
-        <h1 id="hero-title">Your next city.<br><span>Your kind of life.</span></h1>
-        <p class="hero-copy">The music you replay. The cafés you love. The stories that stay with you. Turn your taste into a shortlist of places that feel like you.</p>
-        <a class="text-link" href="#profile">Build your taste profile <span aria-hidden="true">↓</span></a>
+
+  <header class="hero">
+    <div class="hero-media" aria-hidden="true"></div>
+    <nav class="topbar shell" aria-label="Site">
+      <a class="brand" href="/" aria-label="Relocation Scout home"><span class="brand-icon" aria-hidden="true"><svg><use href="#i-pin"/></svg></span>Relocation Scout</a>
+      <span class="powered">Powered by Qloo Taste AI</span>
+    </nav>
+    <div class="hero-inner shell">
+      <div class="hero-copy-block">
+        <p class="eyebrow anim-up">A different way to find home</p>
+        <h1 class="anim-up d1">Your next city.<br>Your <span>kind of life.</span></h1>
+        <p class="hero-copy anim-up d2">The music you replay. The cafés you love. The stories that stay with you. Turn your taste into a shortlist of places that feel like you.</p>
+        <div class="hero-actions anim-up d3">
+          <a class="btn btn-primary" href="#profile">Build your taste profile <svg class="ico arrow" aria-hidden="true"><use href="#i-arrow"/></svg></a>
+          <p class="proof"><span class="proof-dots" aria-hidden="true"><i></i><i></i><i></i></span>Grounded in Qloo’s taste graph:<br>250M+ artists, films, places and brands</p>
+        </div>
       </div>
-      <aside class="how-it-works" aria-label="How scouting works">
+      <aside class="steps-card anim-card" aria-label="How scouting works">
         <p class="eyebrow">From taste to place</p>
-        <ol>
-          <li><strong>Share what you love</strong><span>Artists, stories, food and everyday rituals.</span></li>
-          <li><strong>Connect the dots</strong><span>Qloo’s taste graph finds cultural affinity.</span></li>
-          <li><strong>Explore your shortlist</strong><span>Cities, local spots and the reasons why.</span></li>
+        <ol class="steps">
+          <li><span class="step-icon"><svg aria-hidden="true"><use href="#i-music"/></svg></span><span class="step-num">01</span><span><strong>Share what you love</strong><span>Artists, stories, food and everyday rituals.</span></span></li>
+          <li><span class="step-icon"><svg aria-hidden="true"><use href="#i-link"/></svg></span><span class="step-num">02</span><span><strong>Connect the dots</strong><span>Qloo’s taste graph finds cultural affinity.</span></span></li>
+          <li><span class="step-icon"><svg aria-hidden="true"><use href="#i-star"/></svg></span><span class="step-num">03</span><span><strong>Explore your shortlist</strong><span>Cities, local spots and the reasons why.</span></span></li>
         </ol>
       </aside>
-    </section>
+    </div>
+  </header>
 
+  <main class="main-card shell">
     <section id="profile" class="profile-section" aria-labelledby="profile-title">
-      <div class="section-heading"><div><p class="eyebrow">01 / Your taste</p><h2 id="profile-title">What makes a place yours?</h2></div><p>Start with a few favorites. Every field is optional.</p></div>
-      <div class="presets" aria-label="Example taste profiles">
+      <div class="section-heading reveal">
+        <div><p class="eyebrow">01 / Your taste</p><h2 id="profile-title">What makes a place <span class="accent">yours?</span></h2><p class="section-lead">Tell us a few things you love, and we’ll find cities that match your taste and lifestyle.</p></div>
+        <p class="hint">Start with a few favorites. Every field is optional.</p>
+      </div>
+      <div class="presets reveal" aria-label="Example taste profiles">
         <span>Need inspiration?</span>
-        <button type="button" data-preset="0">Indie creative</button>
-        <button type="button" data-preset="1">Foodie &amp; nightlife</button>
-        <button type="button" data-preset="2">Outdoorsy family · US</button>
+        <button type="button" class="chip-btn" data-preset="0"><svg aria-hidden="true"><use href="#i-palette"/></svg>Indie creative</button>
+        <button type="button" class="chip-btn" data-preset="1"><svg aria-hidden="true"><use href="#i-utensils"/></svg>Foodie &amp; nightlife</button>
+        <button type="button" class="chip-btn" data-preset="2"><svg aria-hidden="true"><use href="#i-mountain"/></svg>Outdoorsy family · US</button>
+        <button type="button" class="chip-btn" data-preset="3"><svg aria-hidden="true"><use href="#i-laptop"/></svg>Tech &amp; remote</button>
       </div>
       <form id="f" aria-describedby="form-help">
-        <p id="form-help" class="form-help">Use specific names, separated by commas. Up to 5 items per field; the first 12 favorites inform your search.</p>
+        <p id="form-help" class="visually-hidden">Use specific names, separated by commas. Up to 5 items per field; the first 12 favorites inform your search.</p>
         <div class="form-grid">
-          <fieldset class="form-card">
-            <legend>Culture &amp; stories</legend>
-            <label for="music">Music <span>artists</span></label><input id="music" name="music" maxlength="400" placeholder="Radiohead, Bon Iver">
-            <label for="films">Films</label><input id="films" name="films" maxlength="400" placeholder="Amélie, Lost in Translation">
-            <label for="tv">TV shows</label><input id="tv" name="tv" maxlength="400" placeholder="The Bear">
-            <label for="books">Books</label><input id="books" name="books" maxlength="400" placeholder="Norwegian Wood">
+          <fieldset class="form-panel reveal">
+            <legend class="panel-heading warm"><svg aria-hidden="true"><use href="#i-heart"/></svg>Culture &amp; stories</legend>
+            <div class="fields">
+              <div class="field"><svg class="field-icon" aria-hidden="true"><use href="#i-music"/></svg><label for="music">Music</label><input id="music" name="music" maxlength="400" autocomplete="off" placeholder="e.g. Radiohead, Bon Iver"></div>
+              <div class="field"><svg class="field-icon" aria-hidden="true"><use href="#i-film"/></svg><label for="films">Films</label><input id="films" name="films" maxlength="400" autocomplete="off" placeholder="e.g. Amélie, Lost in Translation"></div>
+              <div class="field"><svg class="field-icon" aria-hidden="true"><use href="#i-tv"/></svg><label for="tv">TV shows</label><input id="tv" name="tv" maxlength="400" autocomplete="off" placeholder="e.g. The Bear"></div>
+              <div class="field"><svg class="field-icon" aria-hidden="true"><use href="#i-book"/></svg><label for="books">Books</label><input id="books" name="books" maxlength="400" autocomplete="off" placeholder="e.g. Norwegian Wood"></div>
+            </div>
           </fieldset>
-          <fieldset class="form-card">
-            <legend>Everyday life</legend>
-            <label for="food">Restaurants &amp; cafés</label><input id="food" name="food" maxlength="400" placeholder="Blue Bottle Coffee, Nobu">
-            <label for="brands">Brands</label><input id="brands" name="brands" maxlength="400" placeholder="Patagonia">
-            <label for="lifestyle">Lifestyle <span>keywords</span></label><input id="lifestyle" name="lifestyle" maxlength="400" placeholder="walkable, art, nightlife, hiking">
-            <label for="compare">Already considering a city? <span>optional</span></label><input id="compare" name="compare" maxlength="60" placeholder="Dubai" aria-describedby="compare-help"><p id="compare-help" class="input-help">We’ll score it on the same Qloo signals and show it next to your top pick.</p>
-            <label for="country">Country <span>optional</span></label><input id="country" name="country" placeholder="US" maxlength="2" pattern="[A-Za-z]{2}" aria-describedby="country-help" autocapitalize="characters"><p id="country-help" class="input-help">Two-letter country code, e.g. US, PT or DE. Leave blank to explore globally.</p>
+          <fieldset class="form-panel reveal">
+            <legend class="panel-heading cool"><svg aria-hidden="true"><use href="#i-leaf"/></svg>Everyday life</legend>
+            <div class="fields">
+              <div class="field"><svg class="field-icon" aria-hidden="true"><use href="#i-utensils"/></svg><label for="food">Restaurants &amp; cafés</label><input id="food" name="food" maxlength="400" autocomplete="off" placeholder="e.g. Blue Bottle Coffee, Nobu"></div>
+              <div class="field"><svg class="field-icon" aria-hidden="true"><use href="#i-tag"/></svg><label for="brands">Brands</label><input id="brands" name="brands" maxlength="400" autocomplete="off" placeholder="e.g. Patagonia"></div>
+              <div class="field"><svg class="field-icon" aria-hidden="true"><use href="#i-person"/></svg><label for="lifestyle">Lifestyle</label><input id="lifestyle" name="lifestyle" maxlength="400" autocomplete="off" placeholder="e.g. walkable, art, nightlife, hiking"></div>
+              <div class="field"><svg class="field-icon" aria-hidden="true"><use href="#i-pin"/></svg><label for="compare">Already considering a city?</label><input id="compare" name="compare" maxlength="60" autocomplete="off" placeholder="e.g. Dubai" aria-describedby="compare-help"></div>
+              <p id="compare-help" class="subhint">We’ll score it on the same Qloo signals and show it next to your top pick.</p>
+              <div class="field"><svg class="field-icon" aria-hidden="true"><use href="#i-globe"/></svg><label for="country">Country</label><input id="country" name="country" placeholder="e.g. US" maxlength="2" pattern="[A-Za-z]{2}" aria-describedby="country-help" autocapitalize="characters" autocomplete="off"></div>
+              <p id="country-help" class="subhint">Two-letter country code, e.g. US, PT or DE. Leave blank to explore globally.</p>
+            </div>
           </fieldset>
         </div>
-        <div class="form-actions"><p>Cultural affinity, not a cost-of-living ranking.</p><button id="submit" class="primary-button" type="submit">Find my cities <span aria-hidden="true">↗</span></button></div>
+        <div class="form-actions">
+          <p class="note"><svg aria-hidden="true"><use href="#i-info"/></svg>Cultural affinity, not a cost-of-living ranking.</p>
+          <button id="submit" class="btn btn-primary" type="submit"><span class="btn-label">Find my cities</span><svg class="ico arrow" aria-hidden="true"><use href="#i-arrow"/></svg></button>
+        </div>
       </form>
     </section>
 
     <section id="agent" class="agent-section" aria-labelledby="agent-title" hidden>
-      <div class="section-heading"><div><p class="eyebrow">Talk it through</p><h2 id="agent-title">Ask the scout</h2></div><p>The agent plans its own Qloo calls: refine, compare, zoom in, or blend in a partner’s taste.</p></div>
-      <div class="agent-suggestions" aria-label="Example questions">
-        <button type="button" data-ask="I love Radiohead, Bon Iver and Lost in Translation. Where should I live?">Start from my taste</button>
-        <button type="button" data-ask="Why not Lisbon?">Why not Lisbon?</button>
-        <button type="button" data-ask="Where in the top city should I look for great coffee?">Zoom into a city</button>
-        <button type="button" data-ask="My partner loves Bad Bunny, Daft Punk and beaches. Find a city that works for both of us.">Blend a partner’s taste</button>
+      <div class="section-heading reveal">
+        <div><p class="eyebrow">Talk it through</p><h2 id="agent-title">Ask the <span class="accent">scout</span></h2></div>
+        <p class="hint">The agent plans its own Qloo calls: refine, compare, zoom in, or blend in a partner’s taste.</p>
       </div>
-      <ol id="agent-log" class="agent-log" aria-live="polite"></ol>
-      <form id="agent-form" class="agent-form">
-        <label for="agent-input" class="visually-hidden">Message the scout</label>
-        <input id="agent-input" name="message" maxlength="600" autocomplete="off" placeholder="e.g. Somewhere in Europe, and I need a good jazz scene">
-        <button id="agent-send" class="primary-button" type="submit">Ask ↗</button>
-      </form>
+      <div class="agent-card reveal">
+        <div class="agent-suggestions" aria-label="Example questions">
+          <button type="button" class="chip-btn" data-ask="I love Radiohead, Bon Iver and Lost in Translation. Where should I live?"><svg aria-hidden="true"><use href="#i-sparkles"/></svg>Start from my taste</button>
+          <button type="button" class="chip-btn" data-ask="Why not Lisbon?"><svg aria-hidden="true"><use href="#i-pin"/></svg>Why not Lisbon?</button>
+          <button type="button" class="chip-btn" data-ask="Where in the top city should I look for great coffee?"><svg aria-hidden="true"><use href="#i-utensils"/></svg>Zoom into a city</button>
+          <button type="button" class="chip-btn" data-ask="My partner loves Bad Bunny, Daft Punk and beaches. Find a city that works for both of us."><svg aria-hidden="true"><use href="#i-heart"/></svg>Blend a partner’s taste</button>
+        </div>
+        <ol id="agent-log" class="agent-log" aria-live="polite"></ol>
+        <form id="agent-form" class="agent-form">
+          <label for="agent-input" class="visually-hidden">Message the scout</label>
+          <svg class="agent-form-icon" aria-hidden="true"><use href="#i-chat"/></svg>
+          <input id="agent-input" name="message" maxlength="600" autocomplete="off" placeholder="e.g. Somewhere in Europe, and I need a good jazz scene">
+          <button id="agent-send" class="btn btn-primary" type="submit"><span>Ask</span><svg class="ico" aria-hidden="true"><use href="#i-send"/></svg></button>
+        </form>
+      </div>
     </section>
 
-    <section class="results-section" aria-labelledby="results-title">
-      <div class="section-heading"><div><p class="eyebrow">02 / Your next chapter</p><h2 id="results-title">A shortlist with a story</h2></div></div>
-      <div id="loading" class="loading-state" role="status" hidden><span class="spinner" aria-hidden="true"></span><div><strong>Connecting your taste to places…</strong><p>Resolving favorites, comparing cities and finding local spots. Usually about 5 seconds.</p></div></div>
+    <section id="shortlist" class="results-section" aria-labelledby="results-title">
+      <div class="section-heading reveal">
+        <div><p class="eyebrow">02 / Your next chapter</p><h2 id="results-title">A shortlist <span class="accent">with a story</span></h2></div>
+        <p class="hint">Your taste becomes a shortlist of cities, with local spots, cultural signals and the reasons why.</p>
+      </div>
+      <div id="loading" class="loading-state" role="status" hidden>
+        <p class="loading-line"><span class="spinner" aria-hidden="true"></span><strong id="loading-step">Connecting your taste to places…</strong></p>
+        <div class="skeleton-grid" aria-hidden="true"><div class="skeleton"></div><div class="skeleton"></div></div>
+      </div>
       <div id="out" aria-live="polite" aria-busy="false">
-        <div class="empty-state"><span class="empty-icon" aria-hidden="true">◎</span><h3>There’s a place for your kind of life.</h3><p>Add a few favorites above, or try an example profile. Your city matches will appear here.</p></div>
+        <div class="empty-state reveal">
+          <svg class="skyline" viewBox="0 0 320 110" aria-hidden="true">
+            <g class="sky-cards"><rect x="18" y="40" width="34" height="44" rx="4" fill="#dfe9f1"/><rect x="268" y="44" width="34" height="40" rx="4" fill="#e7ecef"/></g>
+            <path d="M60 92h200" stroke="#cfdccf" stroke-width="2"/>
+            <g class="town">
+              <path d="M70 92V62l10-12 10 12v30z" fill="#7aa58f"/><rect x="92" y="54" width="22" height="38" rx="2" fill="#e9b872"/>
+              <path d="M118 92V46h8l4-16 4 16h8v46z" fill="#d98d63"/><rect x="146" y="58" width="26" height="34" rx="2" fill="#f1c9a0"/>
+              <path d="M176 92V40l9-14 9 14v52z" fill="#b8635a"/><rect x="198" y="52" width="24" height="40" rx="2" fill="#87b6c8"/>
+              <path d="M226 92V64l10-10 10 10v28z" fill="#5f8f7a"/>
+              <path d="M62 92l7-16 7 16zM246 92l6-14 6 14z" fill="#2f6b55"/>
+            </g>
+            <g class="pin"><path d="M160 6c-7 0-12 5-12 12 0 9 12 20 12 20s12-11 12-20c0-7-5-12-12-12z" fill="#f47b55"/><circle cx="160" cy="18" r="4.5" fill="#fff"/></g>
+          </svg>
+          <h3>There’s a place for your kind of life.</h3>
+          <p>Add a few favorites above, or try an example profile. Your city matches will appear here.</p>
+          <div class="empty-actions">
+            <button type="button" class="btn btn-secondary" data-action="example"><svg class="ico" aria-hidden="true"><use href="#i-sparkles"/></svg>Try an example profile</button>
+            <a class="btn btn-primary" href="#profile">Find my cities <svg class="ico arrow" aria-hidden="true"><use href="#i-arrow"/></svg></a>
+          </div>
+        </div>
       </div>
     </section>
   </main>
-  <footer class="site-footer shell"><div><strong>Relocation Scout</strong><p>Built for the Qloo Agentic Hackathon.</p></div><p>Powered by Qloo Taste AI™ · Not affiliated with Qloo.<br>A starting point for exploration, not relocation advice.</p></footer>
+
+  <footer class="site-footer shell">
+    <div><strong>Relocation Scout</strong><p>Built for the Qloo Agentic Hackathon.</p></div>
+    <p>Powered by Qloo Taste AI™ · Not affiliated with Qloo.<br>A starting point for exploration, not relocation advice.</p>
+  </footer>
 </body>
 </html>

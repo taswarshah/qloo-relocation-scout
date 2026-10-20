@@ -681,3 +681,10 @@ def test_blend_label_never_duplicates_the_user(monkeypatch):
     _script_llm(monkeypatch, [_call("blend_profiles", {"music": "Other", "label": "you and your partner"}), {"content": "ok"}])
     body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "blend"}], "profile": {"music": "X"}}).json()
     assert body["result"]["blend"] == {"a": "You", "b": "Partner"}
+
+
+def test_scores_round_like_the_ui():
+    """The card badge rounds (Math.round); the text must say the same number (0.829 -> 83, not 82)."""
+    city = {"name": "Roundville", "entity_id": "c9", "query": {"affinity": 0.829}, "properties": {"geocode": {}}}
+    result = agent.build_city(city, ([], True, 15), {"t": {"c9": 0.869}}, [{"id": "t", "name": "Taste", "category": "music"}])
+    assert "scores 83/100" in result["why"] and "Taste (87)" in result["why"]

@@ -83,7 +83,7 @@ Screenshots of results and the comparison view contain Qloo response data, so th
 ## Notes
 - Qloo responses are cached in memory only. No Qloo data is stored in this repo, as the hackathon terms require.
 - Requests are rate-limited (semaphore plus 429 backoff).
-- Third-party credits: Qloo Insights API, FastAPI, httpx.
+- Third-party credits: Qloo Insights API, FastAPI, httpx; DM Sans and Manrope fonts (SIL Open Font License, self-hosted); Lucide icons (ISC); hero photo of Manarola from Unsplash (Unsplash License).
 
 ## Security
 See [SECURITY.md](SECURITY.md): input limits, rate limiting, CSP, no secrets or Qloo data in the repo, and CI running pytest, pip-audit, bandit and gitleaks.

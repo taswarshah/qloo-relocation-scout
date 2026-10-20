@@ -1,7 +1,11 @@
+document.documentElement.classList.add("js");
+const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
 const presets = [
   { music: "Radiohead, Bon Iver", films: "Amelie, Lost in Translation", food: "Blue Bottle Coffee", lifestyle: "art, cafes, walkable" },
   { music: "Daft Punk, Bad Bunny", tv: "The Bear", food: "Nobu", lifestyle: "nightlife, beaches" },
-  { music: "Coldplay, Taylor Swift", films: "Up, Paddington", lifestyle: "hiking, kids, nature", country: "US" }
+  { music: "Coldplay, Taylor Swift", films: "Up, Paddington", lifestyle: "hiking, kids, nature", country: "US" },
+  { music: "Tycho, Bonobo", films: "Her, Ex Machina", tv: "Black Mirror", lifestyle: "coworking, cafes, walkable" }
 ];
 const form = document.getElementById("f");
 const output = document.getElementById("out");
@@ -32,8 +36,31 @@ function message(title, text, isError = false) {
 function scoreBadge(affinity) {
   const score = Math.round(Math.min(1, Math.max(0, Number(affinity) || 0)) * 100);
   const badge = element("div", null, "score-badge");
-  badge.append(element("strong", `${score}`), element("span", "/ 100"), element("small", "taste affinity"));
+  const number = element("strong", reduceMotion ? `${score}` : "0");
+  badge.append(number, element("span", "/ 100"), element("small", "taste affinity"));
+  if (!reduceMotion) countUp(number, score);
   return badge;
+}
+
+function countUp(node, target, ms = 900) {
+  const start = performance.now();
+  const tick = now => {
+    const t = Math.min(1, (now - start) / ms);
+    node.textContent = String(Math.round(target * (1 - Math.pow(1 - t, 3))));
+    if (t < 1) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
+function bar(score, label) {
+  const track = element("span", null, "bar");
+  track.setAttribute("role", "img");
+  track.setAttribute("aria-label", label);
+  const fill = element("span", null, "bar-fill");
+  track.append(fill);
+  // Set after the first paint so the width transition animates from zero (CSSOM writes are CSP-safe).
+  requestAnimationFrame(() => requestAnimationFrame(() => { fill.style.width = `${score}%`; }));
+  return track;
 }
 
 function localSection(city) {
@@ -58,8 +85,11 @@ function localSection(city) {
   return section;
 }
 
+const HUES = [160, 28, 200, 340, 95, 250];
 function cityCard(city, index) {
   const card = element("article", null, "city-card");
+  card.style.setProperty("--i", String(index));
+  card.style.setProperty("--hue", String(HUES[index % HUES.length]));
   const header = element("div", null, "city-heading");
   const title = element("div");
   title.append(element("p", `MATCH ${String(index + 1).padStart(2, "0")}`, "eyebrow"), element("h3", city.city || city.location));
@@ -79,10 +109,8 @@ function cityCard(city, index) {
     for (const driver of city.drivers) {
       const score = Math.round(Math.min(1, Math.max(0, Number(driver.affinity) || 0)) * 100);
       const row = element("li");
-      const meter = element("meter");
-      meter.min = 0; meter.max = 100; meter.value = score;
-      meter.setAttribute("aria-label", `${driver.taste} affinity ${score} of 100`);
-      row.append(element("span", driver.taste, "driver-name"), meter, element("span", String(score), "driver-score"));
+      row.append(element("span", driver.taste, "driver-name"), bar(score, `${driver.taste} affinity ${score} of 100`),
+                 element("span", String(score), "driver-score"));
       bars.append(row);
     }
     drivers.append(bars);
@@ -231,20 +259,41 @@ function shareBar(result) {
   return bar;
 }
 
+const LOADING_STEPS = ["Resolving your favorites in Qloo…", "Ranking cities by taste affinity…",
+                       "Scoring each taste city by city…", "Finding neighborhoods and local spots…"];
+let loadingTimer = null;
 function setBusy(value) {
   busy = value;
   loading.hidden = !value;
   output.setAttribute("aria-busy", String(value));
   submit.disabled = value;
-  submit.textContent = value ? "Scouting your cities…" : "Find my cities ↗";
+  submit.classList.toggle("is-loading", value);
+  submit.querySelector(".btn-label").textContent = value ? "Scouting your cities…" : "Find my cities";
+  submit.querySelector(".spinner")?.remove();
+  if (value) submit.prepend(element("span", null, "spinner"));
   for (const button of presetButtons) button.disabled = value;
   for (const field of form.querySelectorAll("input")) field.disabled = value;
+  clearInterval(loadingTimer);
+  const step = document.getElementById("loading-step");
+  if (value && step) {
+    let i = 0;
+    step.textContent = LOADING_STEPS[0];
+    loadingTimer = setInterval(() => { i = Math.min(i + 1, LOADING_STEPS.length - 1); step.textContent = LOADING_STEPS[i]; }, 1400);
+  }
+}
+
+function scrollToResults() {
+  document.getElementById("shortlist").scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
 }
 
 for (const button of presetButtons) {
   button.addEventListener("click", () => {
     const preset = presets[Number(button.dataset.preset)];
-    for (const field of form.elements) if (field.name) field.value = preset[field.name] || "";
+    for (const field of form.elements) {
+      if (!field.name) continue;
+      field.value = preset[field.name] || "";
+      if (field.value && !reduceMotion) { field.classList.remove("flash"); void field.offsetWidth; field.classList.add("flash"); }
+    }
     for (const option of presetButtons) option.setAttribute("aria-pressed", String(option === button));
     document.getElementById("music").focus();
   });
@@ -266,6 +315,7 @@ form.addEventListener("submit", async event => {
   history.replaceState(null, "", shareUrl(profile));
   setBusy(true);
   output.replaceChildren();
+  scrollToResults();
   try {
     const response = await fetch("/api/scout", {
       method: "POST",
@@ -278,6 +328,7 @@ form.addEventListener("submit", async event => {
       return;
     }
     renderResults(result);
+    scrollToResults();
   } catch {
     message("We couldn’t connect", "Please try again. Your taste profile is still here.", true);
   } finally {
@@ -329,8 +380,13 @@ async function askAgent(text) {
   agentBusy = true; agentSend.disabled = true; agentInput.value = "";
   chatHistory.push({ role: "user", content: text.trim().slice(0, 600) });
   addBubble("user", text.trim());
-  const pending = addBubble("agent", "Thinking and querying Qloo…");
-  pending.classList.add("thinking");
+  const pending = element("li", null, "from-agent thinking");
+  const dots = element("span", null, "typing");
+  dots.setAttribute("aria-label", "The scout is querying Qloo");
+  dots.append(element("i"), element("i"), element("i"));
+  pending.append(dots);
+  agentLog.append(pending);
+  agentLog.scrollTop = agentLog.scrollHeight;
   try {
     const response = await fetch("/api/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -345,7 +401,7 @@ async function askAgent(text) {
       for (const name of FIELDS) if (name !== "compare") form.elements[name].value = body.profile[name] || "";
       lastProfile = body.profile;
     }
-    if (body.result && !body.result.error) renderResults(body.result);
+    if (body.result && !body.result.error) { renderResults(body.result); scrollToResults(); }
   } catch {
     pending.remove();
     chatHistory.pop();
@@ -358,3 +414,23 @@ async function askAgent(text) {
 agentForm.addEventListener("submit", event => { event.preventDefault(); askAgent(agentInput.value); });
 for (const button of document.querySelectorAll("[data-ask]")) button.addEventListener("click", () => askAgent(button.dataset.ask));
 fetch("/api/config").then(r => r.json()).then(cfg => { if (cfg.chat) agentSection.hidden = false; }).catch(() => {});
+
+// Empty-state shortcut: load the first example profile and scout it.
+output.addEventListener("click", event => {
+  const trigger = event.target.closest("[data-action=example]");
+  if (!trigger || busy) return;
+  presetButtons[0].click();
+  form.requestSubmit();
+});
+
+// Scroll reveal: sections ease in as they enter the viewport (everything stays visible without JS).
+(() => {
+  const items = document.querySelectorAll(".reveal");
+  if (reduceMotion || !("IntersectionObserver" in window)) { for (const item of items) item.classList.add("is-visible"); return; }
+  const observer = new IntersectionObserver(entries => {
+    for (const entry of entries) if (entry.isIntersecting) { entry.target.classList.add("is-visible"); observer.unobserve(entry.target); }
+  }, { rootMargin: "0px 0px -8% 0px", threshold: 0.08 });
+  for (const item of items) observer.observe(item);
+  // Safety net for tools that never scroll (full-page screenshots, previews): show everything eventually.
+  setTimeout(() => { for (const item of items) item.classList.add("is-visible"); }, 3000);
+})();

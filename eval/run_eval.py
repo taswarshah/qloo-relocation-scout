@@ -73,8 +73,8 @@ def claims_backed(city: dict) -> tuple[int, int, list[str]]:
         if cond: ok += 1
         else: bad.append(label)
     m = re.match(r"(.+?) scores (\d+)/100", why)
-    check(bool(m) and int(m.group(2)) == int(city["affinity"] * 100), "overall score")
-    drivers = {d["taste"]: int(d["affinity"] * 100) for d in city["drivers"]}
+    check(bool(m) and int(m.group(2)) == agent.pct(city["affinity"]), "overall score")
+    drivers = {d["taste"]: agent.pct(d["affinity"]) for d in city["drivers"]}
     pull = re.search(r"Strongest pull: (.+?)\.(?: [A-Z]|$)", why)
     if pull:
         for name, score in re.findall(r"([^,]+?) \((\d+)\)", pull.group(1)):
