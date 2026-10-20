@@ -165,6 +165,12 @@ function renderResults(result) {
   }
   const cities = result.cities || [];
   shownCities = cities.slice();
+  if (result.blend) {
+    const panel = element("section", null, "candidate-panel");
+    panel.append(element("h3", `Compromise cities · ${result.blend.a} + ${result.blend.b}`));
+    panel.append(element("p", "Each city is scored on each person’s taste separately and ranked by the lower of the two scores, so neither of you gets a city only the other loves."));
+    fragment.append(panel);
+  }
   const cmp = result.compare;
   if (cmp) {
     const panel = element("section", null, "candidate-panel");
@@ -289,3 +295,66 @@ form.addEventListener("submit", async event => {
   }
   if (any) form.requestSubmit();
 })();
+
+// Conversational agent: shown only when the server has an LLM configured.
+const agentSection = document.getElementById("agent");
+const agentForm = document.getElementById("agent-form");
+const agentInput = document.getElementById("agent-input");
+const agentSend = document.getElementById("agent-send");
+const agentLog = document.getElementById("agent-log");
+const chatHistory = [];
+let agentBusy = false;
+
+function profileFromForm() {
+  const profile = {};
+  for (const name of FIELDS) if (name !== "compare" && form.elements[name].value.trim()) profile[name] = form.elements[name].value.trim();
+  return profile;
+}
+
+function addBubble(role, text, steps) {
+  const item = element("li", null, role === "user" ? "from-user" : "from-agent");
+  item.append(element("p", text));
+  if (steps?.length) {
+    const list = element("ul", null, "agent-steps");
+    for (const step of steps) list.append(element("li", step));
+    item.append(list);
+  }
+  agentLog.append(item);
+  agentLog.scrollTop = agentLog.scrollHeight;
+  return item;
+}
+
+async function askAgent(text) {
+  if (agentBusy || !text.trim()) return;
+  agentBusy = true; agentSend.disabled = true; agentInput.value = "";
+  chatHistory.push({ role: "user", content: text.trim().slice(0, 600) });
+  addBubble("user", text.trim());
+  const pending = addBubble("agent", "Thinking and querying Qloo…");
+  pending.classList.add("thinking");
+  try {
+    const response = await fetch("/api/chat", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: chatHistory.slice(-8), profile: profileFromForm() })
+    });
+    const body = await response.json();
+    pending.remove();
+    if (!response.ok || body.error) { addBubble("agent", body.error || "Something went wrong."); chatHistory.pop(); return; }
+    chatHistory.push({ role: "assistant", content: String(body.reply).slice(0, 600) });
+    addBubble("agent", body.reply, body.steps);
+    if (body.profile) {
+      for (const name of FIELDS) if (name !== "compare") form.elements[name].value = body.profile[name] || "";
+      lastProfile = body.profile;
+    }
+    if (body.result && !body.result.error) renderResults(body.result);
+  } catch {
+    pending.remove();
+    chatHistory.pop();
+    addBubble("agent", "We couldn’t reach the agent. Please try again.");
+  } finally {
+    agentBusy = false; agentSend.disabled = false;
+  }
+}
+
+agentForm.addEventListener("submit", event => { event.preventDefault(); askAgent(agentInput.value); });
+for (const button of document.querySelectorAll("[data-ask]")) button.addEventListener("click", () => askAgent(button.dataset.ask));
+fetch("/api/config").then(r => r.json()).then(cfg => { if (cfg.chat) agentSection.hidden = false; }).catch(() => {});

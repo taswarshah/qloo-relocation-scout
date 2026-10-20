@@ -10,20 +10,58 @@ Measures, per synthetic persona:
 Writes aggregate metrics to eval/RESULTS.md. Per Qloo's terms, no Qloo response data (entity names,
 cities, venues) is written to the repo - only numbers.
 
-Baseline hook: `baseline(profile)` is a placeholder for a future non-Qloo baseline (e.g. an LLM-only
-recommender) to compare against. Intentionally not implemented: no LLM is called from the app or eval.
+LLM-only baseline (runs when LLM_API_KEY / LLM_BASE_URL / LLM_MODEL are set): the same model, same personas,
+no Qloo. Compared on non-circular measures (genericness across personas, sensitivity to taste changes) plus
+how the baseline's picks score on Qloo's taste graph (labelled as Qloo's own yardstick).
 """
 import asyncio, json, os, re, statistics, sys, time
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from collections import Counter
+import httpx
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 import agent  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TASTE_FIELDS = ["music", "films", "tv", "books", "food", "brands"]
 
 
-def baseline(profile: dict) -> list[str] | None:
-    """Hook for a future baseline recommender. Return a list of city names, or None to skip."""
-    return None
+BASELINE_PROMPT = ("Recommend the 4 best cities in the world for this person to live in, based only on their taste. "
+                   "Answer with a JSON array of 4 city names and nothing else.\nTaste profile: {profile}")
+
+
+def baseline_enabled() -> bool:
+    return all(os.getenv(k) for k in ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL"))
+
+
+async def baseline(profile: dict) -> list[str] | None:
+    """LLM-only recommender: the same model the app's agent uses, with no Qloo access."""
+    if not baseline_enabled():
+        return None
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(f"{os.environ['LLM_BASE_URL'].rstrip('/')}/chat/completions",
+                              headers={"Authorization": f"Bearer {os.environ['LLM_API_KEY']}"},
+                              json={"model": os.environ["LLM_MODEL"], "temperature": 0, "max_tokens": 200,
+                                    "messages": [{"role": "user", "content": BASELINE_PROMPT.format(profile=json.dumps(profile))}]})
+    r.raise_for_status()
+    text = r.json()["choices"][0]["message"]["content"]
+    match = re.search(r"\[.*\]", text, re.S)
+    try:
+        cities = json.loads(match.group(0)) if match else []
+    except ValueError:
+        cities = []
+    return [str(c).split(",")[0].strip() for c in cities if str(c).strip()][:4]
+
+
+async def qloo_score_of(profile: dict, cities: list[str]) -> list[float]:
+    """Score arbitrary city names on Qloo for a profile (used to put the baseline on Qloo's yardstick)."""
+    q = agent.Qloo()
+    entities, tags = await agent.resolve_profile(q, profile, [])
+    hits = await asyncio.gather(*[q.search(c, "urn:entity:destination") for c in cities])
+    ids = [h["entity_id"] for h in hits if h]
+    if not ids or not (entities or tags):
+        return []
+    scored = await q.insights(filter__type="urn:entity:destination", filter__results__entities=",".join(ids),
+                              take=len(ids), **agent._signals(entities, tags))
+    return [agent.affinity(m) for m in scored]
 
 
 def claims_backed(city: dict) -> tuple[int, int, list[str]]:
@@ -86,7 +124,7 @@ async def run_persona(p: dict) -> dict:
         o, n, _ = claims_backed(c); ok += o; tot += n
     dest_tags = [t["name"].lower() for t in r["lifestyle_tags"] if "destination" in t["id"]]
     tag_hits = sum(1 for t in dest_tags if any(t in (x.lower() for x in c["city_tags"]) for c in cities))
-    return {
+    row = {
         "id": p["id"], "seconds": round(secs, 2), "partial": r["health"]["partial"],
         "asked": {f: len(v) for f, v in asked.items() if v}, "resolved": {f: resolved[f] for f, v in asked.items() if v},
         "lifestyle_asked": len(words), "lifestyle_resolved": len(r["lifestyle_tags"]),
@@ -97,8 +135,43 @@ async def run_persona(p: dict) -> dict:
         "widened": sum(1 for c in cities if (c.get("radius_km") or 0) > agent.URBAN_RADIUS_KM),
         "claims_ok": ok, "claims_total": tot,
         "jaccard_top4_vs_perturbed": jaccard([c["city"] for c in cities], [c["city"] for c in rp.get("cities", [])]),
-        "baseline": "not run" if baseline(p["profile"]) is None else "run",
+        "cities": [c["city"] for c in cities],  # kept in memory for genericness stats; never written to the repo
     }
+    base = await baseline(p["profile"])
+    if base is not None:
+        base_perturbed = await baseline(p["perturbed"]) or []
+        scores = await qloo_score_of(p["profile"], base)
+        row.update({"baseline_cities": base,
+                    "baseline_jaccard": jaccard(base, base_perturbed),
+                    "baseline_qloo_affinity": statistics.mean(scores) if scores else None,
+                    "baseline_overlap_with_scout": jaccard(base, row["cities"])})
+    return row
+
+
+def genericness(lists: list[list[str]]) -> tuple[int, int, float]:
+    """Distinct cities across personas, total slots, and the share of slots taken by the 5 most common cities."""
+    slots = [c.lower() for cities in lists for c in cities]
+    top5 = sum(n for _, n in Counter(slots).most_common(5))
+    return len(set(slots)), len(slots), top5 / max(1, len(slots))
+
+
+def baseline_lines(good: list[dict]) -> list[str]:
+    if not good or "baseline_cities" not in good[0]:
+        return ["- Not run: set `LLM_API_KEY`, `LLM_BASE_URL` and `LLM_MODEL` to compare against an LLM-only recommender."]
+    rows = [r for r in good if "baseline_cities" in r]
+    sd, sn, st = genericness([r["cities"] for r in rows])
+    bd, bn, bt = genericness([r["baseline_cities"] for r in rows])
+    scored = [r["baseline_qloo_affinity"] for r in rows if r["baseline_qloo_affinity"] is not None]
+    return [
+        f"Model: `{os.getenv('LLM_MODEL')}`, temperature 0, same personas, no Qloo access.", "",
+        "| Measure | Relocation Scout (Qloo) | LLM only |", "|---|---|---|",
+        f"| Distinct cities across {len(rows)} personas (higher = more personal) | {sd}/{sn} | {bd}/{bn} |",
+        f"| Share of all picks taken by the 5 most common cities (lower = less generic) | {st:.0%} | {bt:.0%} |",
+        f"| Top-4 overlap, persona vs perturbed (lower = responds to taste) | {statistics.mean(r['jaccard_top4_vs_perturbed'] for r in rows):.2f} | {statistics.mean(r['baseline_jaccard'] for r in rows):.2f} |",
+        f"| Mean Qloo affinity of the picks (Qloo's own yardstick) | {statistics.mean(r['mean_affinity'] for r in rows):.2f} | {statistics.mean(scored):.2f} |" if scored else "| Mean Qloo affinity | n/a | n/a |",
+        "| Per-taste attribution, neighborhoods, venues | ✔ from Qloo | ✘ not available |", "",
+        f"- Mean overlap between the two systems' top-4: {statistics.mean(r['baseline_overlap_with_scout'] for r in rows):.2f}",
+    ]
 
 
 async def main():
@@ -106,7 +179,7 @@ async def main():
     rows = []
     for p in personas:
         row = await run_persona(p); rows.append(row)
-        print(json.dumps(row), flush=True)
+        print(json.dumps({k: v for k, v in row.items() if k not in ("cities", "baseline_cities")}), flush=True)
     good = [r for r in rows if "error" not in r]
     asked = sum(sum(r["asked"].values()) for r in good); res = sum(sum(r["resolved"].values()) for r in good)
     per_cat = {}
@@ -140,8 +213,8 @@ async def main():
         *[f"  - {r['id']}: {r['jaccard_top4_vs_perturbed']:.2f}" for r in good], "",
         "## Latency (cold cache, first run of each persona)",
         f"- p50 {statistics.median(secs):.1f} s · max {max(secs):.1f} s", "",
-        "## Baseline",
-        "- Not run. `baseline()` in `run_eval.py` is a hook for a future non-Qloo baseline; no LLM is called by the app or this eval.",
+        "## Baseline: the same LLM without Qloo",
+        *baseline_lines(good),
     ]
     if len(good) < len(rows):
         lines += ["", "## Errors", *[f"- {r['id']}: {r['error']}" for r in rows if "error" in r]]

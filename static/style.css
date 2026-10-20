@@ -163,3 +163,22 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .75rem; line-he
 .secondary-button:focus-visible { outline-color: var(--accent); }
 .driver-bars meter { accent-color: var(--accent); }
 @media (max-width: 640px) { .compare-table { font-size: .82rem; } .compare-table tbody th { width: 34%; } }
+
+.agent-section { border-top: 1px solid var(--line); margin-top: 24px; padding-top: 40px; }
+.agent-suggestions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.agent-suggestions button { color: var(--ink); background: transparent; border: 1px solid var(--line); padding: 7px 13px; border-radius: 30px; font-size: .8rem; }
+.agent-suggestions button:hover { border-color: var(--accent); background: var(--soft); }
+.agent-log { list-style: none; padding: 0; margin: 0 0 14px; display: grid; gap: 10px; max-height: 420px; overflow-y: auto; }
+.agent-log:empty { display: none; }
+.agent-log li { max-width: 85%; padding: 12px 16px; border-radius: 16px; font-size: .88rem; overflow-wrap: anywhere; }
+.agent-log .from-user { justify-self: end; background: var(--ink); color: #fff; border-bottom-right-radius: 4px; }
+.agent-log .from-agent { justify-self: start; background: #fff; border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+.agent-log .from-agent p { margin: 0; white-space: pre-line; }
+.agent-log .agent-steps { margin: 8px 0 0; padding: 0; list-style: none; font-size: .72rem; color: var(--muted); }
+.agent-log .agent-steps li { padding: 0; max-width: none; }
+.agent-log .agent-steps li::before { content: "↳ Qloo · "; color: var(--accent); font-weight: 650; }
+.agent-log .thinking { color: var(--muted); font-style: italic; }
+.agent-form { display: flex; gap: 10px; }
+.agent-form input { flex: 1; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+@media (max-width: 640px) { .agent-log li { max-width: 100%; } .agent-form { flex-direction: column; } }

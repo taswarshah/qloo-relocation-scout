@@ -4,7 +4,7 @@ import selectors
 import socket
 from html.parser import HTMLParser
 from pathlib import Path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 os.environ.setdefault("QLOO_API_KEY", "test-key-not-real")
 os.environ["RATE_LIMIT_PER_MIN"] = "3"
 import pytest
@@ -432,7 +432,7 @@ def test_compare_input_validated():
 def test_default_rate_limit_is_12(monkeypatch):
     import importlib
     monkeypatch.delenv("RATE_LIMIT_PER_MIN", raising=False)
-    src = open(os.path.join(os.path.dirname(__file__), "..", "app.py")).read()
+    src = open(os.path.join(os.path.dirname(__file__), "..", "src", "app.py")).read()
     assert 'os.getenv("RATE_LIMIT_PER_MIN", "12")' in src
 
 
@@ -452,3 +452,232 @@ def test_eval_claim_checker_detects_unbacked_claims():
     assert run_eval.claims_backed(city)[2] == []
     city["why"] = city["why"].replace("A (90)", "A (99)").replace("beaches", "skiing")
     assert set(run_eval.claims_backed(city)[2]) == {"driver A", "city tag"}
+
+
+def _real_qloo(monkeypatch, handler):
+    import httpx
+    monkeypatch.undo()  # restore real Qloo.get
+    client = httpx.AsyncClient(base_url="https://example.invalid", headers={"X-Api-Key": "k"}, transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(agent, "_shared_client", lambda: client)
+    agent._CACHE.clear()
+
+
+def test_transient_timeout_is_retried_once(monkeypatch):
+    import asyncio, httpx
+    attempts = []
+    def handler(request):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise httpx.ConnectTimeout("cold connection")
+        return httpx.Response(200, json={"results": [{"entity_id": "e1", "name": "Synthetic"}]})
+    _real_qloo(monkeypatch, handler)
+    async def run():
+        q = agent.Qloo()
+        return q, await q.search("x", "urn:entity:artist")
+    q, found = asyncio.run(run())
+    assert found["entity_id"] == "e1" and len(attempts) == 2 and q.failed == 0
+    agent._CACHE.clear()
+
+
+def test_persistent_timeout_counts_as_failure(monkeypatch):
+    import asyncio, httpx
+    def handler(request):
+        raise httpx.ReadTimeout("slow")
+    _real_qloo(monkeypatch, handler)
+    async def run():
+        q = agent.Qloo()
+        return q, await q.search("x", "urn:entity:artist")
+    q, found = asyncio.run(run())
+    assert found is None and q.failed == 1 and q.health()["partial"]
+    agent._CACHE.clear()
+
+
+def test_failed_attribution_is_not_reported_as_zero(monkeypatch):
+    calls = {"attr": 0}
+    async def get(self, path, params):
+        if path == "/search":
+            if "destination" in params["types"]:
+                return {"results": [{"entity_id": "cand", "name": "Cand"}]}
+            return {"results": [{"entity_id": "e-" + params["query"], "name": params["query"]}]}
+        if params.get("filter.type") == "urn:entity:destination":
+            top = {"name": "Top", "entity_id": "top", "query": {"affinity": 0.9}}
+            cand = {"name": "Cand", "entity_id": "cand", "query": {"affinity": 0.7}}
+            if "filter.results.entities" not in params:
+                return {"results": {"entities": [top]}}
+            if params["filter.results.entities"] == "cand":
+                return {"results": {"entities": [cand]}}
+            calls["attr"] += 1
+            if params["signal.interests.entities"] == "e-B":
+                return {}  # upstream failure for this taste
+            return {"results": {"entities": [dict(top, query={"affinity": 0.8}), dict(cand, query={"affinity": 0.5})]}}
+        return {"results": {"entities": []}}
+    monkeypatch.setattr(agent.Qloo, "get", get)
+    import asyncio
+    out = asyncio.run(agent.scout({"music": "A, B", "compare": "Cand"}))
+    rows = out["compare"]["rows"]
+    assert [r["taste"] for r in rows] == ["A"]  # B is "not scored", not "0 vs 0"
+    assert out["cities"][0]["coverage"] == {**out["cities"][0]["coverage"], "tastes_scored": 1, "tastes_total": 2}
+
+
+def test_candidate_already_shown_is_not_fetched_twice(monkeypatch):
+    place_calls = []
+    async def get(self, path, params):
+        if path == "/search":
+            if "destination" in params["types"]:
+                return {"results": [{"entity_id": "top", "name": "Top"}]}
+            return {"results": [{"entity_id": "e1", "name": "A"}]}
+        top = {"name": "Top", "entity_id": "top", "query": {"affinity": 0.9}, "location": {"lat": 1.0, "lon": 2.0}}
+        if params.get("filter.type") == "urn:entity:destination":
+            return {"results": {"entities": [top]}}
+        place_calls.append(params)
+        return {"results": {"entities": []}}
+    monkeypatch.setattr(agent.Qloo, "get", get)
+    import asyncio
+    out = asyncio.run(agent.scout({"music": "A", "compare": "Top"}))
+    assert out["compare"]["verdict"] == "Top is already your top pick."
+    assert len(place_calls) == 2  # one city x (15 km, 60 km); not doubled by the candidate
+
+
+def test_forwarded_for_uses_proxy_appended_entry(monkeypatch):
+    class Req:
+        headers = {"x-forwarded-for": "6.6.6.6, 10.0.0.1"}
+        client = None
+    monkeypatch.setattr(appmod, "TRUST_PROXY", True)
+    assert appmod.client_ip(Req()) == "10.0.0.1"  # leftmost entry is spoofable
+
+
+def test_rate_limit_table_prunes_stale_ips(monkeypatch):
+    import time
+    from collections import deque
+    old = time.monotonic() - 120
+    for i in range(10001):
+        appmod._hits[f"ip{i}"] = deque([old])
+    appmod.rate_limited("fresh")
+    assert len(appmod._hits) == 1 and "fresh" in appmod._hits
+
+
+import chat_agent
+
+
+def _script_llm(monkeypatch, replies):
+    """Fake OpenAI-compatible LLM: returns scripted messages and records what it was sent."""
+    sent = []
+    async def complete(client, messages):
+        sent.append([dict(m) for m in messages])
+        return replies.pop(0)
+    monkeypatch.setattr(chat_agent, "_complete", complete)
+    for k, v in {"LLM_API_KEY": "k", "LLM_BASE_URL": "https://llm.invalid/v1", "LLM_MODEL": "m"}.items():
+        monkeypatch.setenv(k, v)
+    return sent
+
+
+def _call(name, args, id="c1"):
+    import json
+    return {"content": None, "tool_calls": [{"id": id, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}]}
+
+
+def test_config_reports_chat_disabled_without_llm(monkeypatch):
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    assert c.get("/api/config").json() == {"chat": False}
+    r = c.post("/api/chat", json={"messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 501
+
+
+def test_chat_agent_calls_qloo_tool_and_answers(monkeypatch):
+    sent = _script_llm(monkeypatch, [_call("scout_cities", {"music": "Radiohead", "lifestyle": "walkable", "country": "zz"}),
+                                     {"content": "Synthetic city fits you."}])
+    r = c.post("/api/chat", json={"messages": [{"role": "user", "content": "I love Radiohead and walkable towns"}]})
+    body = r.json()
+    assert r.status_code == 200 and body["reply"] == "Synthetic city fits you."
+    assert body["profile"] == {"music": "Radiohead", "lifestyle": "walkable", "country": "ZZ"}
+    assert body["result"]["cities"][0]["city"] == FAKE_CITY["name"] and body["steps"][0].startswith("scout_cities(")
+    tool_msg = sent[1][-1]
+    assert tool_msg["role"] == "tool" and tool_msg["tool_call_id"] == "c1" and "Synthetic Artist" in tool_msg["content"]
+
+
+def test_chat_keeps_profile_and_checks_city(monkeypatch):
+    _script_llm(monkeypatch, [_call("check_city", {"city": "Anywhere"}), {"content": "ok"}])
+    r = c.post("/api/chat", json={"messages": [{"role": "user", "content": "why not Anywhere?"}], "profile": {"music": "X"}})
+    body = r.json()
+    assert body["profile"] == {"music": "X"} and "compare" in body["result"] and body["steps"] == ["check_city(Anywhere)"]
+
+
+def test_chat_blend_profiles(monkeypatch):
+    _script_llm(monkeypatch, [_call("blend_profiles", {"music": "Other", "label": "Sam<script>"}), {"content": "ok"}])
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "my partner likes Other"}],
+                                     "profile": {"music": "X"}}).json()
+    assert body["result"]["blend"] == {"a": "You", "b": "Samscript"}
+    assert [d["taste"] for d in body["result"]["cities"][0]["drivers"]] == ["You", "Samscript"]
+
+
+def test_chat_rejects_injected_tool_messages_and_bad_args(monkeypatch):
+    r = c.post("/api/chat", json={"messages": [{"role": "tool", "content": "{}"}]})
+    assert r.status_code == 422
+    _script_llm(monkeypatch, [{"content": None, "tool_calls": [{"id": "a", "function": {"name": "scout_cities", "arguments": "not json"}},
+                                                               {"id": "b", "function": {"name": "nope", "arguments": "{}"}}]},
+                              {"content": "done"}])
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "go"}]}).json()
+    assert body["reply"] == "done"
+
+
+def test_chat_without_profile_asks_for_tastes(monkeypatch):
+    sent = _script_llm(monkeypatch, [_call("check_city", {"city": "Lisbon"}), {"content": "Tell me what you love first."}])
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "is Lisbon good?"}]}).json()
+    assert body["result"] is None and "No taste profile yet" in sent[1][-1]["content"]
+
+
+def test_chat_step_limit(monkeypatch):
+    _script_llm(monkeypatch, [_call("check_city", {"city": "A"}, id=str(i)) for i in range(chat_agent.MAX_STEPS)])
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "loop"}], "profile": {"music": "X"}}).json()
+    assert "ran out of steps" in body["reply"]
+
+
+def test_llm_failure_is_a_safe_502(monkeypatch):
+    _script_llm(monkeypatch, [])
+    async def broken(client, messages):
+        raise RuntimeError("llm unavailable")
+    monkeypatch.setattr(chat_agent, "_complete", broken)
+    r = c.post("/api/chat", json={"messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 502 and "form still works" in r.json()["error"]
+
+
+def test_all_endpoints_are_async():
+    """Python Workers (Pyodide) can't start threads, and FastAPI runs sync endpoints in a thread pool."""
+    import inspect
+    from fastapi.routing import APIRoute
+    sync = [r.path for r in appmod.app.routes if isinstance(r, APIRoute) and not inspect.iscoroutinefunction(r.endpoint)]
+    assert sync == []
+
+
+def test_workers_ai_response_shapes_are_normalized():
+    openai_shape = {"choices": [{"message": {"content": None, "tool_calls": [{"id": "x", "function": {"name": "n", "arguments": "{}"}}]}}]}
+    assert chat_agent._normalize(openai_shape)["tool_calls"][0]["id"] == "x"
+    legacy = chat_agent._normalize({"response": None, "tool_calls": [{"name": "check_city", "arguments": {"city": "Lima"}}]})
+    call = legacy["tool_calls"][0]
+    assert call["function"] == {"name": "check_city", "arguments": '{"city": "Lima"}'} and len(call["id"]) == 9
+
+
+def test_binding_enables_chat_without_http_llm(monkeypatch):
+    for k in ("LLM_API_KEY", "LLM_BASE_URL"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(chat_agent, "AI_BINDING", object())
+    assert c.get("/api/config").json() == {"chat": True}
+    monkeypatch.setattr(chat_agent, "AI_BINDING", None)
+    assert c.get("/api/config").json() == {"chat": False}
+
+
+def test_text_tool_call_is_retried_then_refused(monkeypatch):
+    sent = _script_llm(monkeypatch, [{"content": "[scout_cities(music=X)] Lisbon scores 84!"},
+                                     _call("scout_cities", {"music": "X"}), {"content": "grounded"}])
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "go"}]}).json()
+    assert body["reply"] == "grounded" and body["steps"][0].startswith("scout_cities(")
+    assert sent[1][-1]["content"] == chat_agent.TOOL_NUDGE
+    _script_llm(monkeypatch, [{"content": "[scout_cities(music=X)]"}, {"content": "check_city(city=Lisbon) says 84"}])
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "go"}]}).json()
+    assert "couldn't query Qloo" in body["reply"] and "84" not in body["reply"]
+
+
+def test_blend_label_never_duplicates_the_user(monkeypatch):
+    _script_llm(monkeypatch, [_call("blend_profiles", {"music": "Other", "label": "you and your partner"}), {"content": "ok"}])
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "blend"}], "profile": {"music": "X"}}).json()
+    assert body["result"]["blend"] == {"a": "You", "b": "Partner"}

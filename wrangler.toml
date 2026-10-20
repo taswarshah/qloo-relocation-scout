@@ -1,0 +1,47 @@
+# Cloudflare Python Worker deployment: `uv run pywrangler deploy`
+# Secrets (never in this file): `uv run pywrangler secret put QLOO_API_KEY` (and LLM_API_KEY if used).
+name = "relocation-scout"
+main = "src/entry.py"
+compatibility_date = "2026-09-01"
+compatibility_flags = ["python_workers"]
+workers_dev = true
+routes = [{ pattern = "scout.taswar.dev", custom_domain = true }]
+
+[build]
+command = "python3 scripts/build_site.py"
+
+[assets]
+directory = ".site"
+binding = "ASSETS"
+
+# Workers AI powers the chat agent (no external LLM key needed). Uses the account's Workers AI allowance.
+[ai]
+binding = "AI"
+
+[vars]
+LLM_MODEL = "@cf/mistralai/mistral-small-3.1-24b-instruct"
+ENV = "production"
+QLOO_BASE_URL = "https://hackathon.api.qloo.com"
+# Cloudflare sets cf-connecting-ip on every request to a Worker, so it is safe to trust here.
+TRUST_PROXY_HEADERS = "1"
+
+# Edge rate limits (Workers Rate Limiting API, free), enforced before the app runs. They protect the Qloo quota
+# and cap worst-case Workers AI spend: per-IP limits for both APIs plus a global ceiling on chat turns.
+[[ratelimits]]
+name = "SCOUT_LIMITER"
+namespace_id = "1001"
+simple = { limit = 10, period = 60 }
+
+[[ratelimits]]
+name = "CHAT_LIMITER"
+namespace_id = "1002"
+simple = { limit = 6, period = 60 }
+
+[[ratelimits]]
+name = "CHAT_GLOBAL_LIMITER"
+namespace_id = "1003"
+# ~105 neurons per chat turn (measured): 12/min bounds worst-case Workers AI use even under a sustained attack.
+simple = { limit = 12, period = 60 }
+
+[observability]
+enabled = true

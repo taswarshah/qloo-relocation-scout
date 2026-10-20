@@ -4,9 +4,11 @@ from collections import defaultdict, deque
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
+# Endpoints are all `async def`: sync ones run in a thread pool, and Python Workers (Pyodide) have no threads.
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from agent import scout
+import chat_agent
 
 log = logging.getLogger("scout")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -16,6 +18,8 @@ RATE_PER_MIN = int(os.getenv("RATE_LIMIT_PER_MIN", "12"))
 MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT_SCOUTS", "3"))
 SCOUT_TIMEOUT = float(os.getenv("SCOUT_TIMEOUT_S", "60"))
 MAX_BODY = 4096
+MAX_CHAT_BODY = 16384  # a short chat history plus the profile
+CHAT_TIMEOUT = float(os.getenv("CHAT_TIMEOUT_S", "90"))
 TRUST_PROXY = os.getenv("TRUST_PROXY_HEADERS", "0") == "1"
 # Two-letter ISO 3166-1 alpha-2 format; Qloo ignores unknown codes, so format check is sufficient.
 COUNTRY_RE = re.compile(r"^[A-Z]{2}$")
@@ -51,7 +55,8 @@ class Profile(BaseModel):
 
 def client_ip(req: Request) -> str:
     if TRUST_PROXY:  # only enable behind a trusted proxy (e.g. Cloudflare)
-        ip = req.headers.get("cf-connecting-ip") or req.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        # The leftmost X-Forwarded-For entry is client-controlled; the rightmost is the one our proxy appended.
+        ip = req.headers.get("cf-connecting-ip") or req.headers.get("x-forwarded-for", "").split(",")[-1].strip()
         if ip: return ip
     return req.client.host if req.client else "unknown"
 
@@ -60,8 +65,8 @@ def rate_limited(ip: str) -> bool:
     while q and now - q[0] > 60: q.popleft()
     if len(q) >= RATE_PER_MIN: return True
     q.append(now)
-    if len(_hits) > 10000:  # bound memory
-        for k in [k for k, v in _hits.items() if not v][:5000]: _hits.pop(k, None)
+    if len(_hits) > 10000:  # bound memory: drop IPs with no hit in the last minute
+        for k in [k for k, v in _hits.items() if not v or now - v[-1] > 60]: _hits.pop(k, None)
     return False
 
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
@@ -70,7 +75,8 @@ CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' 
 @app.middleware("http")
 async def security(request: Request, call_next):
     cl = request.headers.get("content-length")
-    if cl and (not cl.isdigit() or int(cl) > MAX_BODY):
+    limit = MAX_CHAT_BODY if request.url.path == "/api/chat" else MAX_BODY
+    if cl and (not cl.isdigit() or int(cl) > limit):
         resp = JSONResponse({"error": "Request too large."}, status_code=413)
     elif request.method == "POST" and "content-length" not in request.headers:
         resp = JSONResponse({"error": "Content-Length required."}, status_code=411)
@@ -112,12 +118,47 @@ async def api_scout(p: Profile, request: Request):
             log.exception("scout failed")  # httpx errors include URL only; key is in a header, never logged
             return JSONResponse({"error": "Something went wrong."}, status_code=502)
 
-@app.get("/favicon.ico", include_in_schema=False)
-def favicon(): return FileResponse("static/favicon.svg", media_type="image/svg+xml")
+# Local/Docker: FastAPI serves the frontend. On Cloudflare Workers the same files are served as static assets.
+STATIC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static")
+
+class ChatMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    role: str = Field(pattern="^(user|assistant)$")
+    content: str = Field(max_length=chat_agent.MAX_MESSAGE_CHARS * 2)
+
+class ChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    messages: list[ChatMessage] = Field(min_length=1, max_length=chat_agent.MAX_HISTORY * 2)
+    profile: Profile = Field(default_factory=Profile)
+
+@app.get("/api/config")
+async def config(): return {"chat": chat_agent.configured()}
+
+@app.post("/api/chat")
+async def api_chat(body: ChatRequest, request: Request):
+    if not chat_agent.configured():
+        return JSONResponse({"error": "The chat agent isn't enabled on this server. Use the form instead."}, status_code=501)
+    if rate_limited(client_ip(request)):
+        return JSONResponse({"error": "Too many requests. Try again in a minute."}, status_code=429, headers={"Retry-After": "60"})
+    if _scout_slots.locked():
+        return JSONResponse({"error": "Busy right now. Try again shortly."}, status_code=503, headers={"Retry-After": "10"})
+    async with _scout_slots:
+        try:
+            profile = body.profile.model_dump(exclude={"compare"})
+            result = await asyncio.wait_for(chat_agent.chat([m.model_dump() for m in body.messages], profile), timeout=CHAT_TIMEOUT)
+            return JSONResponse(result, status_code=422 if result.get("error") else 200)
+        except asyncio.TimeoutError:
+            return JSONResponse({"error": "The agent took too long. Try a simpler question."}, status_code=504)
+        except Exception:
+            log.exception("chat failed")
+            return JSONResponse({"error": "The agent is unavailable right now. The form still works."}, status_code=502)
 
 @app.get("/healthz")
-def health(): return {"ok": True}
+async def health(): return {"ok": True}
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
-@app.get("/")
-def index(): return FileResponse("static/index.html")
+if os.path.isdir(STATIC):
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon(): return FileResponse(os.path.join(STATIC, "favicon.svg"), media_type="image/svg+xml")
+    app.mount("/static", StaticFiles(directory=STATIC), name="static")
+    @app.get("/")
+    async def index(): return FileResponse(os.path.join(STATIC, "index.html"))

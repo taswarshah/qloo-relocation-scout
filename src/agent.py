@@ -116,6 +116,7 @@ class ScoutResult(TypedDict, total=False):
     timings: dict[str, int]
     compare: Comparison
     health: dict[str, Any]
+    blend: dict[str, str]
     warning: str
     error: str
 
@@ -169,23 +170,34 @@ class Qloo:
         stat = self.stats[path]
         stat["calls"] += 1
         async with SEM:
-            try:
-                for attempt in range(4):
+            transient_retried = False
+            attempt = 0
+            while True:
+                try:
                     response = await self.c.get(path, params=params)
-                    if response.status_code != 429:
-                        break
-                    if attempt < 3:
+                except (httpx.TimeoutException, httpx.TransportError) as exc:
+                    # GETs are idempotent: one quick retry rides out a cold-connection stall.
+                    if not transient_retried:
+                        transient_retried = True
                         stat["retries"] += 1
-                        # Short, capped backoff keeps p95 under the 8 s budget.
-                        await asyncio.sleep(min(float(response.headers.get("retry-after") or 0) or 0.4 * (attempt + 1), 2.0))
-            except httpx.TimeoutException:
-                stat["timeouts"] += 1
-                log.warning("qloo %s timed out", path)  # never log params, URL query or key
-                return {}
-            except httpx.HTTPError as exc:
-                stat["network_errors"] += 1
-                log.warning("qloo %s failed: %s", path, type(exc).__name__)
-                return {}
+                        continue
+                    if isinstance(exc, httpx.TimeoutException):
+                        stat["timeouts"] += 1
+                        log.warning("qloo %s timed out", path)  # never log params, URL query or key
+                    else:
+                        stat["network_errors"] += 1
+                        log.warning("qloo %s failed: %s", path, type(exc).__name__)
+                    return {}
+                except httpx.HTTPError as exc:
+                    stat["network_errors"] += 1
+                    log.warning("qloo %s failed: %s", path, type(exc).__name__)
+                    return {}
+                if response.status_code != 429 or attempt >= 3:
+                    break
+                attempt += 1
+                stat["retries"] += 1
+                # Short, capped backoff keeps p95 under the 8 s budget.
+                await asyncio.sleep(min(float(response.headers.get("retry-after") or 0) or 0.4 * attempt, 2.0))
         if response.status_code == 429:
             stat["rate_limited"] += 1
             log.warning("qloo %s rate limited after retries", path)
@@ -334,7 +346,7 @@ def place_matches_city(place: QlooEntity, city: QlooEntity, by_radius: bool = Fa
 
 IRRELEVANT_CATEGORY = re.compile(
     r"\b(hotel|motel|lodging|resort hotel|extended stay|apartment|condominium|real estate|school|educational|"
-    r"kindergarten|preschool|office|gas station|fuel|subway station|train station|bus (stop|station)|transit|"
+    r"kindergarten|preschool|university|college|office|supermarket|grocery|discount store|dollar store|variety store|convenience store|gas station|fuel|subway station|train station|bus (stop|station)|transit|"
     r"rest stop|parking|bank|atm|hospital|clinic|medical|dentist|pharmacy|car (rental|dealer|repair|wash)|"
     r"storage|post office|government|courthouse|police|embassy|conference center|warehouse|factory|airport)\b")
 
@@ -461,11 +473,7 @@ async def _scout(q: Qloo, profile: dict[str, str], n_cities: int) -> ScoutResult
                     "trace": trace, "health": q.health()}
         return {"error": "Couldn't match any of your tastes in Qloo. Try specific artists, films or restaurants.", "trace": trace,
                 "health": q.health()}
-    signals: Parameters = {}
-    if entities:
-        signals["signal__interests__entities"] = ",".join(entity["id"] for entity in entities)
-    if tags:
-        signals["signal__interests__tags"] = ",".join(tag["id"] for tag in tags)
+    signals = _signals(entities, tags)
     country_filter: Parameters = {}
     if profile.get("country"):
         country_filter["filter__geocode__country_code"] = profile["country"].upper()
@@ -488,18 +496,28 @@ async def _scout(q: Qloo, profile: dict[str, str], n_cities: int) -> ScoutResult
 
     # Round 3 (all parallel): exact per-taste affinity for exactly the shown cities via
     # filter.results.entities, plus taste-matched venues around each city.
-    shown = cities + ([cand_entity] if cand_entity else [])
+    if cand_entity and any(c["entity_id"] == cand_entity["entity_id"] for c in cities):
+        cand_entity = next(c for c in cities if c["entity_id"] == cand_entity["entity_id"])
+        shown = cities  # already shown: don't fetch its venues twice
+    else:
+        shown = cities + ([cand_entity] if cand_entity else [])
     ids = ",".join(c["entity_id"] for c in shown)
     attribution = [q.insights(filter__type="urn:entity:destination", signal__interests__entities=e["id"],
                               filter__results__entities=ids, take=len(shown)) for e in entities]
     place_jobs = [find_places(q, c, signals) for c in shown]
     gathered = await asyncio.gather(*attribution, *place_jobs)
     # Keyed by Qloo entity ID so two tastes with the same display name never overwrite each other.
+    # An empty result means the call failed (the filter always returns the shown cities), so that
+    # taste is left out as "not scored" rather than reported as a real 0.
     per_taste: dict[str, dict[str, float]] = {
-        e["id"]: {m["entity_id"]: affinity(m) for m in matches} for e, matches in zip(entities, gathered[:len(entities)])}
+        e["id"]: {m["entity_id"]: affinity(m) for m in matches}
+        for e, matches in zip(entities, gathered[:len(entities)]) if matches}
     trace.append(f"insights(destination, filter.results.entities=shown cities) per-taste x{len(entities)} for attribution")
     built = [build_city(c, found, per_taste, entities) for c, found in zip(shown, gathered[len(entities):])]
-    cand_result = built.pop() if cand_entity else None
+    if cand_entity and len(shown) == len(cities):
+        cand_result = next(b for b in built if b["city"] == cand_entity["name"])
+    else:
+        cand_result = built.pop() if cand_entity else None
     results = built
     t3 = time.perf_counter()
     narrative = await llm_summary(profile, results)
@@ -513,12 +531,97 @@ async def _scout(q: Qloo, profile: dict[str, str], n_cities: int) -> ScoutResult
         out["warning"] = ("Some Qloo requests failed or timed out, so these results may be incomplete. "
                           "Try again in a moment.")
     if candidate_name:
-        out["compare"] = compare(candidate_name, cand_result, results[0] if results else None, entities)
+        scored = [e for e in entities if e["id"] in per_taste]
+        out["compare"] = compare(candidate_name, cand_result, results[0] if results else None, scored)
     return out
 
 
 async def _none() -> None:
     return None
+
+
+def _signals(entities: list[MatchedTaste], tags: list[LifestyleTag]) -> Parameters:
+    signals: Parameters = {}
+    if entities:
+        signals["signal__interests__entities"] = ",".join(entity["id"] for entity in entities)
+    if tags:
+        signals["signal__interests__tags"] = ",".join(tag["id"] for tag in tags)
+    return signals
+
+
+async def blend(profile_a: dict[str, str], profile_b: dict[str, str], n_cities: int = 4,
+                labels: tuple[str, str] = ("You", "Partner")) -> ScoutResult:
+    """Couple/family mode: find cities where the *less* satisfied person is happiest.
+
+    Each person's tastes are resolved separately. A candidate pool is ranked on the combined
+    signals, then every candidate is scored for each person alone (filter.results.entities),
+    and cities are ordered by min(score_a, score_b), a compromise rather than one person's list.
+    """
+    q = Qloo()
+    trace: list[str] = []
+    t0 = time.perf_counter()
+    (ea, ta), (eb, tb) = await asyncio.gather(resolve_profile(q, profile_a, trace), resolve_profile(q, profile_b, trace))
+    if not (ea or ta) or not (eb or tb):
+        who = labels[0] if not (ea or ta) else labels[1]
+        return {"error": f"Couldn't match any of {who}'s tastes in Qloo.", "trace": trace, "health": q.health()}
+    country = (profile_a.get("country") or profile_b.get("country") or "").upper()
+    country_filter: Parameters = {"filter__geocode__country_code": country} if country else {}
+    combined = _signals(ea + [e for e in eb if e["id"] not in {x["id"] for x in ea}],
+                        ta + [t for t in tb if t["id"] not in {x["id"] for x in ta}])
+    destinations = await q.insights(filter__type="urn:entity:destination", take=n_cities * 4, **combined, **country_filter)
+    pool = unique_cities(destinations, n_cities * 3)
+    trace.append(f"insights(destination, both profiles) → {len(pool)} candidate cities")
+    if not pool:
+        return {"error": "Qloo found no destinations for this pair of profiles.", "trace": trace, "health": q.health()}
+    ids = ",".join(c["entity_id"] for c in pool)
+    hits_a, hits_b = await asyncio.gather(
+        q.insights(filter__type="urn:entity:destination", filter__results__entities=ids, take=len(pool), **_signals(ea, ta)),
+        q.insights(filter__type="urn:entity:destination", filter__results__entities=ids, take=len(pool), **_signals(eb, tb)))
+    score_a = {m["entity_id"]: affinity(m) for m in hits_a}
+    score_b = {m["entity_id"]: affinity(m) for m in hits_b}
+    trace.append(f"insights(destination, filter.results.entities=pool) scored separately for {labels[0]} and {labels[1]}")
+    ranked = sorted(pool, key=lambda c: (-min(score_a.get(c["entity_id"], 0), score_b.get(c["entity_id"], 0)), -affinity(c)))
+    shown = ranked[:n_cities]
+    found = await asyncio.gather(*[find_places(q, c, combined) for c in shown])
+    per_person = {"person-a": score_a, "person-b": score_b} if hits_a and hits_b else {}
+    people: list[MatchedTaste] = [{"id": "person-a", "name": labels[0], "category": "person"},
+                                  {"id": "person-b", "name": labels[1], "category": "person"}]
+    cities = [build_city(c, f, per_person, people) for c, f in zip(shown, found)]
+    total = round((time.perf_counter() - t0) * 1000)
+    trace.append(f"done in {total} ms · {q.calls} Qloo calls · {q.cache_hits} cache hits")
+    out: ScoutResult = {"matched": ea + eb, "lifestyle_tags": ta + tb, "cities": cities, "narrative": None, "trace": trace,
+                        "timings": {"total_ms": total, "qloo_calls": q.calls, "cache_hits": q.cache_hits, "qloo_failed": q.failed},
+                        "health": q.health(), "blend": {"a": labels[0], "b": labels[1]}}
+    if q.failed:
+        out["warning"] = "Some Qloo requests failed or timed out, so these results may be incomplete. Try again in a moment."
+    return out
+
+
+async def spots(profile: dict[str, str], city_name: str, focus: str = "") -> dict[str, Any]:
+    """Zoom into one city for this profile, optionally nudged by a focus keyword ("coffee", "jazz bars")."""
+    q = Qloo()
+    trace: list[str] = []
+    (entities, tags), city_hit, focus_tags = await asyncio.gather(
+        resolve_profile(q, profile, trace), q.search(city_name[:60], "urn:entity:destination"),
+        q.tags(focus[:40]) if focus else _none())
+    if not city_hit:
+        return {"error": f"Couldn't find '{city_name}' as a destination in Qloo.", "health": q.health()}
+    focus_tag = (focus_tags or [None])[0]
+    if focus_tag:
+        tags = tags + [{"id": focus_tag["id"], "name": focus_tag["name"], "word": focus}]
+        trace.append(f"tags: '{focus}' → {focus_tag['id']}")
+    if not entities and not tags:
+        return {"error": "Couldn't match any tastes in Qloo.", "health": q.health()}
+    signals = _signals(entities, tags)
+    scored = await q.insights(filter__type="urn:entity:destination", filter__results__entities=city_hit["entity_id"],
+                              take=1, **signals)
+    city = scored[0] if scored else city_hit
+    places, by_radius, radius_km = await find_places(q, city, signals)
+    neighborhoods, top_spots, vibe = summarize_places(places, city, by_radius)
+    trace.append(f"insights(place, near {city.get('name')}) → {len(places)} venues")
+    return {"city": city.get("name"), "affinity": round(affinity(city), 3), "focus": focus_tag["name"] if focus_tag else None,
+            "neighborhoods": neighborhoods, "top_spots": top_spots, "vibe": vibe, "radius_km": radius_km,
+            "trace": trace, "health": q.health()}
 
 
 def compare(name: str, cand: CityResult | None, top: CityResult | None,
@@ -597,7 +700,7 @@ def build_city(city: QlooEntity, found: tuple[list[QlooEntity], bool, int | None
         "why": "", "radius_km": radius_km,
         "coverage": {"places_returned": len(places), "places_relevant": len(relevant),
                      "neighborhoods": len(neighborhoods), "tastes_scored": sum(1 for _, s in drivers if s > 0),
-                     "tastes_total": len(per_taste)},
+                     "tastes_total": len(entities) if entities else len(per_taste)},
     }
     result["why"] = explain(result, [])
     return result
@@ -665,6 +768,8 @@ async def llm_summary(profile: dict[str, str], results: list[CityResult]) -> str
         async with httpx.AsyncClient(timeout=httpx.Timeout(8.0, connect=3.0)) as client:
             response = await client.post(f"{base.rstrip('/')}/chat/completions", headers={"Authorization": f"Bearer {key}"},
                              json={"model": model, "max_tokens": 300, "messages": [{"role": "user", "content": msg}]})
+            if response.status_code != 200:
+                return None
             return response.json()["choices"][0]["message"]["content"]
     except (httpx.HTTPError, KeyError, IndexError, ValueError):
         return None

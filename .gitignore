@@ -12,3 +12,10 @@ qloo_responses/
 # Screenshots containing Qloo results stay local (Qloo terms: no response data in a public repo); upload them to Devpost directly
 docs/screenshots/*results*.png
 docs/screenshots/*compare*.png
+.site/
+.wrangler/
+python_modules/
+.venv-workers/
+.dev.vars
+uv.lock.bak
+pylock.toml

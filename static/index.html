@@ -64,6 +64,22 @@
       </form>
     </section>
 
+    <section id="agent" class="agent-section" aria-labelledby="agent-title" hidden>
+      <div class="section-heading"><div><p class="eyebrow">Talk it through</p><h2 id="agent-title">Ask the scout</h2></div><p>The agent plans its own Qloo calls: refine, compare, zoom in, or blend in a partner’s taste.</p></div>
+      <div class="agent-suggestions" aria-label="Example questions">
+        <button type="button" data-ask="I love Radiohead, Bon Iver and Lost in Translation. Where should I live?">Start from my taste</button>
+        <button type="button" data-ask="Why not Lisbon?">Why not Lisbon?</button>
+        <button type="button" data-ask="Where in the top city should I look for great coffee?">Zoom into a city</button>
+        <button type="button" data-ask="My partner loves Bad Bunny, Daft Punk and beaches. Find a city that works for both of us.">Blend a partner’s taste</button>
+      </div>
+      <ol id="agent-log" class="agent-log" aria-live="polite"></ol>
+      <form id="agent-form" class="agent-form">
+        <label for="agent-input" class="visually-hidden">Message the scout</label>
+        <input id="agent-input" name="message" maxlength="600" autocomplete="off" placeholder="e.g. Somewhere in Europe, and I need a good jazz scene">
+        <button id="agent-send" class="primary-button" type="submit">Ask ↗</button>
+      </form>
+    </section>
+
     <section class="results-section" aria-labelledby="results-title">
       <div class="section-heading"><div><p class="eyebrow">02 / Your next chapter</p><h2 id="results-title">A shortlist with a story</h2></div></div>
       <div id="loading" class="loading-state" role="status" hidden><span class="spinner" aria-hidden="true"></span><div><strong>Connecting your taste to places…</strong><p>Resolving favorites, comparing cities and finding local spots. Usually about 5 seconds.</p></div></div>

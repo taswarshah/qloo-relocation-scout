@@ -15,9 +15,9 @@ jobs:
         run: python -m pytest -q tests/test_app.py
         env: { ENV: production }
       - name: pip-audit
-        run: pip-audit -r requirements.txt
+        run: pip-audit -r requirements-server.txt
       - name: bandit
-        run: bandit -q -r agent.py app.py
+        run: bandit -q -r src
       - name: gitleaks (full history)
         run: |
           curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz | tar xz gitleaks

@@ -1,6 +1,6 @@
 # Evaluation results
 
-Run: 2026-10-20 02:25 PKT · live Qloo hackathon API · 10 synthetic personas (see `personas.json`) · 10 completed · 0 with partial upstream data.
+Run: 2026-10-20 12:49 PKT · live Qloo hackathon API · 10 synthetic personas (see `personas.json`) · 10 completed · 0 with partial upstream data.
 Only aggregate numbers are recorded; per Qloo's terms no response data is stored in the repo.
 
 ## Coverage
@@ -37,7 +37,17 @@ Only aggregate numbers are recorded; per Qloo's terms no response data is stored
   - single_taste_edge: 1.00
 
 ## Latency (cold cache, first run of each persona)
-- p50 4.1 s · max 5.7 s
+- p50 9.6 s · max 15.6 s
 
-## Baseline
-- Not run. `baseline()` in `run_eval.py` is a hook for a future non-Qloo baseline; no LLM is called by the app or this eval.
+## Baseline: the same LLM without Qloo
+Model: `@cf/mistralai/mistral-small-3.1-24b-instruct`, temperature 0, same personas, no Qloo access.
+
+| Measure | Relocation Scout (Qloo) | LLM only |
+|---|---|---|
+| Distinct cities across 10 personas (higher = more personal) | 32/38 | 27/40 |
+| Share of all picks taken by the 5 most common cities (lower = less generic) | 26% | 35% |
+| Top-4 overlap, persona vs perturbed (lower = responds to taste) | 0.11 | 0.23 |
+| Mean Qloo affinity of the picks (Qloo's own yardstick) | 0.83 | 0.78 |
+| Per-taste attribution, neighborhoods, venues | ✔ from Qloo | ✘ not available |
+
+- Mean overlap between the two systems' top-4: 0.05
