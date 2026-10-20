@@ -688,3 +688,38 @@ def test_scores_round_like_the_ui():
     city = {"name": "Roundville", "entity_id": "c9", "query": {"affinity": 0.829}, "properties": {"geocode": {}}}
     result = agent.build_city(city, ([], True, 15), {"t": {"c9": 0.869}}, [{"id": "t", "name": "Taste", "category": "music"}])
     assert "scores 83/100" in result["why"] and "Taste (87)" in result["why"]
+
+
+def test_pacer_spaces_requests_to_qloo_rate_limit():
+    import asyncio, time
+    pacer = agent._Pacer(rate=20.0, burst=1)
+    async def run():
+        t = time.monotonic()
+        for _ in range(5):
+            await pacer.wait()
+        return time.monotonic() - t
+    elapsed = asyncio.run(run())
+    assert elapsed >= 0.19  # 5 requests at 20/s with no burst: the last waits ~4 x 50 ms
+
+
+def test_429_waits_for_qloo_reset_header(monkeypatch):
+    import asyncio, httpx
+    seen = []
+    def handler(request):
+        seen.append(1)
+        if len(seen) == 1:
+            return httpx.Response(429, headers={"x-second-ratelimit-reset": "0.1"})
+        return httpx.Response(200, json={"results": [{"entity_id": "e1", "name": "S"}]})
+    _real_qloo(monkeypatch, handler)
+    slept = []
+    real_sleep = asyncio.sleep
+    async def fake_sleep(d, *a, **k):
+        slept.append(d); await real_sleep(0)
+    monkeypatch.setattr(agent.asyncio, "sleep", fake_sleep)
+    async def run():
+        q = agent.Qloo()
+        return q, await q.search("x", "urn:entity:artist")
+    q, found = asyncio.run(run())
+    assert found["entity_id"] == "e1" and q.stats["/search"]["retries"] == 1 and q.failed == 0
+    assert any(abs(d - 0.15) < 1e-6 for d in slept)  # reset 0.1 s + 50 ms margin, not a blind backoff
+    agent._CACHE.clear()

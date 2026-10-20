@@ -23,6 +23,42 @@ CACHE_MAX = int(os.getenv("QLOO_CACHE_MAX", "2000"))
 # Private, in-process (memory-only) cache shared across requests. Never written to disk or the repo,
 # which Qloo's hackathon guide explicitly allows ("private server-side caching is fine").
 _CACHE: "OrderedDict[tuple, tuple[float, dict[str, Any]]]" = OrderedDict()
+# The hackathon key allows 5 requests/second (x-second-ratelimit-limit). Pacing to it avoids the 429s
+# that bursting caused (~60% of first attempts) and the backoff sleeps that came with them.
+# Strict spacing (burst 1) measured best: Qloo counts per fixed one-second window, so bursts still tripped it.
+QLOO_RATE_PER_S = float(os.getenv("QLOO_RATE_PER_S", "4.5"))
+QLOO_BURST = int(os.getenv("QLOO_BURST", "1"))
+
+
+class _Pacer:
+    """Token bucket shared by all requests in this process (one API key, one limit)."""
+
+    def __init__(self, rate: float, burst: int) -> None:
+        self.rate, self.burst = rate, burst
+        self.tokens = float(burst)
+        self.updated = time.monotonic()
+        self.lock: asyncio.Lock | None = None
+
+    async def wait(self) -> None:
+        if self.lock is None:
+            self.lock = asyncio.Lock()
+        async with self.lock:
+            now = time.monotonic()
+            self.tokens = min(self.burst, self.tokens + (now - self.updated) * self.rate)
+            self.updated = now
+            if self.tokens < 1:
+                await asyncio.sleep((1 - self.tokens) / self.rate)
+                self.updated = time.monotonic()
+                self.tokens = 1.0
+            self.tokens -= 1
+
+    def drain(self) -> None:
+        """Qloo said we're over the limit (another isolate or user shares the key): start from empty."""
+        self.tokens = 0.0
+        self.updated = time.monotonic()
+
+
+_PACER = _Pacer(QLOO_RATE_PER_S, QLOO_BURST)
 
 CATEGORY_TYPES = {
     "music": "urn:entity:artist",
@@ -174,6 +210,7 @@ class Qloo:
             attempt = 0
             while True:
                 try:
+                    await _PACER.wait()
                     response = await self.c.get(path, params=params)
                 except (httpx.TimeoutException, httpx.TransportError) as exc:
                     # GETs are idempotent: one quick retry rides out a cold-connection stall.
@@ -196,8 +233,14 @@ class Qloo:
                     break
                 attempt += 1
                 stat["retries"] += 1
-                # Short, capped backoff keeps p95 under the 8 s budget.
-                await asyncio.sleep(min(float(response.headers.get("retry-after") or 0) or 0.4 * attempt, 2.0))
+                _PACER.drain()
+                # Wait exactly until Qloo's per-second window resets (header), capped to keep p95 in budget.
+                reset = response.headers.get("x-second-ratelimit-reset") or response.headers.get("retry-after") or ""
+                try:
+                    delay = float(reset)
+                except ValueError:
+                    delay = 0.4 * attempt
+                await asyncio.sleep(min(max(delay, 0.05) + 0.05, 2.0))
         if response.status_code == 429:
             stat["rate_limited"] += 1
             log.warning("qloo %s rate limited after retries", path)

@@ -317,11 +317,14 @@ form.addEventListener("submit", async event => {
   output.replaceChildren();
   scrollToResults();
   try {
-    const response = await fetch("/api/scout", {
+    const request = () => fetch("/api/scout", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(profile)
     });
+    let response;
+    try { response = await request(); }
+    catch { await new Promise(resolve => setTimeout(resolve, 900)); response = await request(); }  // one retry on a dropped connection (scouts are read-only)
     const result = await response.json();
     if (!response.ok || result.error) {
       message("We couldn’t finish this scout", result.error || "Something went wrong. Please try again.", true);
