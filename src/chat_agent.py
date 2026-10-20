@@ -28,6 +28,11 @@ DEFAULT_WORKERS_AI_MODEL = "@cf/mistralai/mistral-small-3.1-24b-instruct"
 # A tool call written as text ("[scout_cities(music=...)]") instead of through the tool interface.
 TEXT_TOOL_CALL = re.compile(r"\[?\s*(" + "|".join(["scout_cities", "check_city", "explore_city", "blend_profiles"]) + r")\s*\(")
 TOOL_NUDGE = "Call the tools through the tool-calling interface, not as text. Do not answer until a tool has returned."
+# Score-like numbers in a reply ("83", "86/82"); each must come from a Qloo tool result or the conversation.
+NUMBER = re.compile(r"(?<![\d.])\d{2,3}(?![\d.])")
+GROUNDING_NUDGE = ("Your answer contains numbers no Qloo tool returned ({numbers}). Do not guess: call the right tool "
+                   "(blend_profiles for a partner, check_city for one city, scout_cities for a new profile) and answer "
+                   "only from its result.")
 AI_BINDING: Any = None  # Workers AI binding (env.AI), injected by the Worker entrypoint
 
 SYSTEM_PROMPT = """You are Relocation Scout, an agent that helps people decide where to live based on their cultural taste.
@@ -36,6 +41,7 @@ Your only source of facts about places is the Qloo tools. Rules:
 - Quote Qloo numbers as given (0-100 affinity) and name the tastes that drive them.
 - Keep the user's existing profile and change only what they ask. Profile fields are comma-separated names:
   music (artists), films, tv, books, food (restaurants/cafes), brands, lifestyle (keywords), country (2-letter ISO code or empty).
+- If a tool lists unmatched_tastes, tell the user Qloo didn't recognize them and suggest a more specific name.
 - When the user mentions a partner, friend or family member with different taste, use blend_profiles.
 - When the user asks about a specific city, use check_city; for "where in X" or "best area for coffee in X", use explore_city.
 - Qloo covers taste, not cost of living, visas, jobs, safety or weather. If asked, say so plainly; you may add a short,
@@ -46,7 +52,7 @@ _PROFILE_PROPS = {
     "music": {"type": "string", "description": "Comma-separated artists"},
     "films": {"type": "string", "description": "Comma-separated films"},
     "tv": {"type": "string", "description": "Comma-separated TV shows"},
-    "books": {"type": "string", "description": "Comma-separated books"},
+    "books": {"type": "string", "description": "Comma-separated books or authors"},
     "food": {"type": "string", "description": "Comma-separated restaurants or cafes"},
     "brands": {"type": "string", "description": "Comma-separated brands"},
     "lifestyle": {"type": "string", "description": "Comma-separated lifestyle keywords, e.g. walkable, beaches"},
@@ -72,7 +78,8 @@ TOOLS = [
     {"type": "function", "function": {
         "name": "blend_profiles",
         "description": "Couple/family mode: find compromise cities for the user and another person. Cities are ranked by "
-                       "the lower of the two people's Qloo scores. Pass the other person's profile and a short label.",
+                       "the lower of the two people's Qloo scores. Pass ONLY the other person's tastes (the user's profile "
+                       "is already known) and a short label such as 'Partner'.",
         "parameters": {"type": "object", "properties": {**_PROFILE_PROPS, "label": {"type": "string"}}, "required": []}}},
 ]
 
@@ -113,7 +120,7 @@ def _brief_result(result: dict[str, Any]) -> dict[str, Any]:
     """Compact, fact-only view of a pipeline result for the LLM (keeps tokens low)."""
     if result.get("error"):
         return {"error": result["error"]}
-    unmatched = [line.split("'")[1] for line in result.get("trace", []) if line.endswith("→ no match") and "'" in line]
+    unmatched = result.get("unmatched") or agent.unmatched(result.get("trace", []))
     brief: dict[str, Any] = {"matched_tastes": [m["name"] for m in result.get("matched", [])],
                              "unmatched_tastes": unmatched,
                              "cities": [_brief_city(c) for c in result.get("cities", [])]}
@@ -152,13 +159,20 @@ class Session:
             city, focus = str(args.get("city") or "")[:60].strip(), str(args.get("focus") or "")[:40].strip()
             self.steps.append(f"explore_city({city}{', ' + focus if focus else ''})")
             found = await agent.spots(self.profile, city, focus)
-            return {k: v for k, v in found.items() if k not in ("trace", "health")}
+            brief = {k: v for k, v in found.items() if k not in ("trace", "health")}
+            if "affinity" in brief:
+                brief["affinity"] = round(brief["affinity"] * 100)  # the 0-100 scale the cards and other tools use
+            return brief
         if name == "blend_profiles":
             other = clean_profile(args)
+            tastes = {k: v for k, v in other.items() if k != "country"}
+            if not tastes or tastes == {k: v for k, v in self.profile.items() if k != "country"}:
+                return {"error": "Pass the other person's own tastes (e.g. music='Bad Bunny, Daft Punk', lifestyle='beaches'), "
+                                 "not the user's profile."}
             label = re.sub(r"[^\w '\-]", "", str(args.get("label") or "Partner"))[:24].strip()
             if not label or re.search(r"\b(you|your|me|my|us|both)\b", label, re.IGNORECASE):
                 label = "Partner"  # models sometimes pass "you and your partner"; the user is already "You"
-            self.steps.append(f"blend_profiles(You + {label})")
+            self.steps.append(f"blend_profiles(You + {label}: " + ", ".join(f"{k}={v}" for k, v in tastes.items()) + ")")
             self.result = dict(await agent.blend(self.profile, other, labels=("You", label)))
             return _brief_result(self.result)
         return {"error": f"Unknown tool {name}"}
@@ -200,6 +214,12 @@ async def _complete(client: httpx.AsyncClient, messages: list[dict[str, Any]]) -
     return _normalize(response.json())
 
 
+def ungrounded(reply: str, evidence: str) -> list[str]:
+    """Score-like numbers in the reply that appear nowhere in tool output or the conversation."""
+    known = set(NUMBER.findall(evidence))
+    return sorted(set(NUMBER.findall(reply)) - known)
+
+
 def clean_history(history: list[dict[str, Any]] | None) -> list[dict[str, str]]:
     """Only user/assistant text from the client; tool messages are never accepted from outside."""
     out = []
@@ -218,8 +238,10 @@ async def chat(history: list[dict[str, Any]], profile: dict[str, Any] | None) ->
         return {"error": "Send a message to the agent."}
     context = f"Current profile: {json.dumps(session.profile) if session.profile else 'empty'}"
     messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT + "\n\n" + context}, *turns]
+    # Everything the reply may quote numbers from: the conversation, plus every tool result this turn.
+    evidence = [t["content"] for t in turns]
     async with httpx.AsyncClient(timeout=httpx.Timeout(25.0, connect=5.0)) as client:
-        nudged = False
+        nudged = grounded_retry = False
         for _ in range(MAX_STEPS):
             message = await _complete(client, messages)
             calls = message.get("tool_calls") or []
@@ -230,6 +252,17 @@ async def chat(history: list[dict[str, Any]], profile: dict[str, Any] | None) ->
                     break
                 nudged = True
                 messages.append({"role": "user", "content": TOOL_NUDGE})  # mid-chat system turns break some templates
+                continue
+            missing = [] if calls else ungrounded(message.get("content") or "", "\n".join(evidence))
+            if missing:
+                # A number that no tool returned is a hallucinated score: send the model back to the tools once,
+                # then refuse rather than show it.
+                if grounded_retry:
+                    message = {"content": "Sorry, I couldn't ground that answer in Qloo data. Please try rephrasing."}
+                    break
+                grounded_retry = True
+                messages.append({"role": "assistant", "content": message.get("content") or ""})
+                messages.append({"role": "user", "content": GROUNDING_NUDGE.format(numbers=", ".join(missing))})
                 continue
             if not calls:
                 break
@@ -243,6 +276,7 @@ async def chat(history: list[dict[str, Any]], profile: dict[str, Any] | None) ->
                 except ValueError:
                     args = {}
                 output = await session.run_tool(str(fn.get("name")), args)
+                evidence.append(json.dumps(output, ensure_ascii=False))
                 messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": json.dumps(output, ensure_ascii=False, separators=(",", ":"))[:4000]})
             for call in calls[3:]:  # every tool_call must be answered for the next request to be valid
                 messages.append({"role": "tool", "tool_call_id": call.get("id", ""),

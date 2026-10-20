@@ -60,7 +60,7 @@ async def qloo_score_of(profile: dict, cities: list[str]) -> list[float]:
     if not ids or not (entities or tags):
         return []
     scored = await q.insights(filter__type="urn:entity:destination", filter__results__entities=",".join(ids),
-                              take=len(ids), **agent._signals(entities, tags))
+                              take=len(ids), **agent._signals(entities))
     return [agent.affinity(m) for m in scored]
 
 
@@ -81,7 +81,7 @@ def claims_backed(city: dict) -> tuple[int, int, list[str]]:
             check(drivers.get(name.strip()) == int(score), f"driver {name.strip()}")
     known = re.search(r"Known for: (.+?)\.", why)
     if known:
-        tags = {t.lower() for t in city["city_tags"]}
+        tags = set(agent.known_for(city["city_tags"]))
         for t in known.group(1).split(", "):
             check(t.strip() in tags, "city tag")
     start = re.search(r"Start in (.+?): spots like (.+?) match your taste\.", why)
@@ -122,8 +122,8 @@ async def run_persona(p: dict) -> dict:
     ok = tot = 0
     for c in cities:
         o, n, _ = claims_backed(c); ok += o; tot += n
-    dest_tags = [t["name"].lower() for t in r["lifestyle_tags"] if "destination" in t["id"]]
-    tag_hits = sum(1 for t in dest_tags if any(t in (x.lower() for x in c["city_tags"]) for c in cities))
+    dest_tags = [t["destination_tag"].rsplit(":", 1)[-1] for t in r["lifestyle_tags"] if t.get("destination_tag")]
+    tag_hits = sum(1 for t in dest_tags if any(t == re.sub(r"[^a-z]+", "_", x.lower()).strip("_") for c in cities for x in c["city_tags"]))
     row = {
         "id": p["id"], "seconds": round(secs, 2), "partial": r["health"]["partial"],
         "asked": {f: len(v) for f, v in asked.items() if v}, "resolved": {f: resolved[f] for f, v in asked.items() if v},
@@ -174,7 +174,12 @@ def baseline_lines(good: list[dict]) -> list[str]:
     ]
 
 
+async def _no_summary(*_args):
+    return None
+
+
 async def main():
+    agent.llm_summary = _no_summary  # the deployed app writes no LLM summary; measure that same pipeline
     personas = json.load(open(os.path.join(HERE, "personas.json")))
     rows = []
     for p in personas:

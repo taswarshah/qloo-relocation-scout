@@ -15,7 +15,7 @@ FAKE_CITY = {"name": "<img src=x onerror=alert(1)>", "entity_id": "c1", "propert
              "query": {"affinity": 0.5}, "tags": [{"name": "Fake tag"}]}
 
 async def fake_get(self, path, params):
-    if path == "/search": return {"results": [{"entity_id": "e1", "name": "Synthetic Artist"}]}
+    if path == "/search": return {"results": [{"entity_id": "e1", "name": params["query"]}]}  # an exact-name match
     if path == "/v2/tags": return {"results": {"tags": [{"id": "urn:tag:fake:destination:x", "name": "X"}]}}
     if params.get("filter.type") == "urn:entity:destination": return {"results": {"entities": [FAKE_CITY]}}
     return {"results": {"entities": [{"name": "Spot", "properties": {"neighborhood": "Hood"}, "tags": [{"name": "Cozy"}, {"name": "Takeout"}]}]}}
@@ -307,7 +307,7 @@ def test_same_name_tastes_keyed_by_id():
     city = _dest("Testville", "ZZ", 1, 1, "city1")
     entities = [{"id": "film-up", "name": "Up", "category": "films"}, {"id": "band-up", "name": "Up", "category": "music"}]
     per_taste = {"film-up": {"city1": 0.9}, "band-up": {"city1": 0.4}}
-    result = agent.build_city(city, ([], True, 15), per_taste, entities)
+    result = agent.build_city(city, ([], True, 15, []), per_taste, entities)
     assert sorted((d["id"], d["affinity"]) for d in result["drivers"]) == [("band-up", 0.4), ("film-up", 0.9)]
 
 
@@ -405,8 +405,8 @@ def test_thin_city_widens_radius(monkeypatch):
     monkeypatch.setattr(agent.Qloo, "insights", fake_insights)
     async def go():
         return await agent.find_places(agent.Qloo.__new__(agent.Qloo), _dest("Flores", "GT", 16.9, -89.9), {})
-    places, by_radius, radius = asyncio.run(go())
-    assert calls == [15000, 60000] and radius == 60 and by_radius and len(places) == 4
+    places, by_radius, radius, venue_filter = asyncio.run(go())
+    assert venue_filter == [] and calls == [15000, 60000] and radius == 60 and by_radius and len(places) == 4
 
 
 def test_location_uses_coordinates_not_ambiguous_name():
@@ -469,7 +469,7 @@ def test_transient_timeout_is_retried_once(monkeypatch):
         attempts.append(1)
         if len(attempts) == 1:
             raise httpx.ConnectTimeout("cold connection")
-        return httpx.Response(200, json={"results": [{"entity_id": "e1", "name": "Synthetic"}]})
+        return httpx.Response(200, json={"results": [{"entity_id": "e1", "name": "X"}]})
     _real_qloo(monkeypatch, handler)
     async def run():
         q = agent.Qloo()
@@ -592,7 +592,7 @@ def test_chat_agent_calls_qloo_tool_and_answers(monkeypatch):
     assert body["profile"] == {"music": "Radiohead", "lifestyle": "walkable", "country": "ZZ"}
     assert body["result"]["cities"][0]["city"] == FAKE_CITY["name"] and body["steps"][0].startswith("scout_cities(")
     tool_msg = sent[1][-1]
-    assert tool_msg["role"] == "tool" and tool_msg["tool_call_id"] == "c1" and "Synthetic Artist" in tool_msg["content"]
+    assert tool_msg["role"] == "tool" and tool_msg["tool_call_id"] == "c1" and "Radiohead" in tool_msg["content"]
 
 
 def test_chat_keeps_profile_and_checks_city(monkeypatch):
@@ -686,7 +686,7 @@ def test_blend_label_never_duplicates_the_user(monkeypatch):
 def test_scores_round_like_the_ui():
     """The card badge rounds (Math.round); the text must say the same number (0.829 -> 83, not 82)."""
     city = {"name": "Roundville", "entity_id": "c9", "query": {"affinity": 0.829}, "properties": {"geocode": {}}}
-    result = agent.build_city(city, ([], True, 15), {"t": {"c9": 0.869}}, [{"id": "t", "name": "Taste", "category": "music"}])
+    result = agent.build_city(city, ([], True, 15, []), {"t": {"c9": 0.869}}, [{"id": "t", "name": "Taste", "category": "music"}])
     assert "scores 83/100" in result["why"] and "Taste (87)" in result["why"]
 
 
@@ -709,7 +709,7 @@ def test_429_waits_for_qloo_reset_header(monkeypatch):
         seen.append(1)
         if len(seen) == 1:
             return httpx.Response(429, headers={"x-second-ratelimit-reset": "0.1"})
-        return httpx.Response(200, json={"results": [{"entity_id": "e1", "name": "S"}]})
+        return httpx.Response(200, json={"results": [{"entity_id": "e1", "name": "X"}]})
     _real_qloo(monkeypatch, handler)
     slept = []
     real_sleep = asyncio.sleep
@@ -778,3 +778,247 @@ def test_hotel_with_only_lodging_categories_is_dropped():
     assert not agent.is_relevant_place(p)
     bar = {"name": "Hotel Monaco", "tags": [{"name": "Cocktail bar", "type": "urn:tag:category:place"}]}
     assert agent.is_relevant_place(bar)
+
+
+# --- Name matching: Qloo search always returns something, so weak matches must be rejected.
+
+@pytest.mark.parametrize(("query", "name", "ok"), [
+    ("Radiohead", "Radiohead", True), ("Amelie", "Amélie", True), ("Radiohed", "Radiohead", True),
+    ("The Bear", "The Bear", True), ("Lord of the Rings", "The Lord of the Rings: The Fellowship of the Ring", True),
+    ("Taylor", "Taylor Swift", True), ("A", "A", True),
+    ("zzqxv qwerty", "Qwerty", False), ("Sally Rooney", "Witch of the Glens (Sally Watson Family Series)", False),
+    ("asdfgh", "Asdf Studio Hamburg", False),
+])
+def test_match_quality(query, name, ok):
+    assert (agent.match_quality(query, name) >= agent.MIN_MATCH) is ok
+
+
+def test_best_match_prefers_exact_name_over_qloo_order():
+    results = [{"name": "Haruki Murakami's The Wind-up Bird Chronicle: A Reader's Guide"}, {"name": "Haruki Murakami"}]
+    assert agent.best_match("Haruki Murakami", results)["name"] == "Haruki Murakami"
+    assert agent.best_match("zzqxv", [{"name": "Qwerty"}]) is None
+    assert agent.best_match("x", []) is None
+
+
+def test_gibberish_taste_is_not_matched(monkeypatch):
+    async def get(self, path, params):
+        if path == "/search": return {"results": [{"entity_id": "q", "name": "Qwerty"}]}
+        return {"results": {"tags": []}}
+    monkeypatch.setattr(agent.Qloo, "get", get)
+    r = c.post("/api/scout", json={"music": "zzqxv qwerty"})
+    body = r.json()
+    assert body["error"].startswith("Couldn't match any of your favorites") and body["unmatched"] == ["zzqxv qwerty"]
+
+
+def test_books_resolve_to_their_author_as_a_person(monkeypatch):
+    """Qloo rejects books as destination signals, so a title or author name becomes the author (a person)."""
+    async def get(self, path, params):
+        if path == "/search" and params["types"] == "urn:entity:book,urn:entity:person":
+            if params["query"] == "Normal People":
+                return {"results": [{"entity_id": "bk", "name": "Normal People", "types": ["urn:entity:book"],
+                                     "disambiguation": "2018, Sally Rooney"}]}
+            return {"results": [{"entity_id": "b0", "name": "Haruki Murakami's Reader's Guide", "types": ["urn:entity:book"]},
+                                {"entity_id": "hm", "name": "Haruki Murakami", "types": ["urn:entity:person"]}]}
+        if path == "/search" and params["types"] == "urn:entity:person":
+            assert params["query"] == "Sally Rooney"
+            return {"results": [{"entity_id": "sr", "name": "Sally Rooney", "types": ["urn:entity:person"]}]}
+        raise AssertionError(params)
+    monkeypatch.setattr(agent.Qloo, "get", get)
+    import asyncio
+    trace = []
+    async def run():
+        return await agent.resolve_profile(agent.Qloo(), {"books": "Normal People, Haruki Murakami"}, trace)
+    entities, _ = asyncio.run(run())
+    assert entities == [{"id": "sr", "name": "Sally Rooney", "category": "books"},
+                        {"id": "hm", "name": "Haruki Murakami", "category": "books"}]
+    assert trace[0] == "search: 'Normal People' → Normal People (book) → author Sally Rooney (person)"
+
+
+def test_long_venue_names_are_shortened():
+    assert agent.display_name("Biryani Zone, Marathahalli, , Hyderabadi Dum Biryani Restaurant") == "Biryani Zone"
+    assert agent.display_name("Café de Flore") == "Café de Flore"
+    assert agent.display_name("Bar, Restaurant") == "Bar, Restaurant"  # short names keep their commas
+
+
+# --- Lifestyle words: Qloo ignores tags as signals, so they must be sent as filters.
+
+def test_lifestyle_words_become_filters_not_signals(monkeypatch):
+    seen = []
+    async def get(self, path, params):
+        seen.append(dict(params))
+        if path == "/v2/tags":
+            assert params["filter.parents.types"] == "urn:entity:place"
+            return {"results": {"tags": [{"id": "urn:tag:decor:qloo:cafe", "name": "Cafe decor"},
+                                         {"id": "urn:tag:genre:place:hotel:cafe", "name": "Cafe"},
+                                         {"id": "urn:tag:category:place:cafe", "name": "Cafe"}]}}
+        return await fake_get(self, path, params)
+    monkeypatch.setattr(agent.Qloo, "get", get)
+    r = c.post("/api/scout", json={"music": "Radiohead", "lifestyle": "cafes"})
+    body = r.json()
+    assert body["lifestyle_tags"][0]["place_tags"] == ["urn:tag:category:place:cafe"]
+    assert body["lifestyle_tags"][0]["destination_tag"] == "urn:tag:genre:destination:foodie_destination"
+    insights = [p for p in seen if "filter.type" in p]
+    assert all("signal.interests.tags" not in p for p in insights)
+    ranking = next(p for p in insights if p["filter.type"] == "urn:entity:destination" and "filter.results.entities" not in p)
+    assert ranking["filter.tags"] == "urn:tag:genre:destination:foodie_destination"
+    venues = [p for p in insights if p["filter.type"] == "urn:entity:place"]
+    assert venues and venues[0]["filter.tags"] == "urn:tag:category:place:cafe"
+
+
+def test_narrow_lifestyle_filter_falls_back_to_full_ranking(monkeypatch):
+    calls = []
+    async def fake_insights(self, **params):
+        calls.append(params)
+        if "filter__tags" in params: return []
+        return [{"name": f"City{i}", "entity_id": f"c{i}", "query": {"affinity": 0.8}} for i in range(4)]
+    monkeypatch.setattr(agent.Qloo, "insights", fake_insights)
+    import asyncio
+    trace = []
+    tags = [{"id": "t", "name": "Beach", "word": "beach", "destination_tag": "urn:tag:genre:destination:beaches", "place_tags": []}]
+    out = asyncio.run(agent.rank_destinations(agent.Qloo.__new__(agent.Qloo), 4, {"signal__interests__entities": "e"}, {}, tags, trace))
+    assert len(out) == 4 and len(calls) == 2 and "too narrow" in trace[-1]
+
+
+def test_lifestyle_only_profile_asks_for_a_favorite(monkeypatch):
+    async def get(self, path, params):
+        if path == "/v2/tags": return {"results": {"tags": [{"id": "urn:tag:category:place:beach", "name": "Beach"}]}}
+        return {"results": {"entities": []}}
+    monkeypatch.setattr(agent.Qloo, "get", get)
+    body = c.post("/api/scout", json={"lifestyle": "beaches"}).json()
+    assert "add at least one artist" in body["error"]
+
+
+@pytest.mark.parametrize(("word", "tag"), [
+    ("beaches", "beaches"), ("hiking", "outdoor_activities"), ("nightlife", "great_nightlife"), ("kids", "kids"),
+    ("walkable", "urban_destinations"), ("art", "art_culture"), ("party", "great_nightlife"), ("skiing", "snow_ski"),
+    ("vinyl", None),
+])
+def test_destination_genre_mapping(word, tag):
+    found = agent.destination_tag(word)
+    assert (found.rsplit(":", 1)[-1] if found else None) == tag
+
+
+def test_place_tag_choice_skips_hotel_and_decor_tags():
+    tags = [{"id": "urn:tag:children:place:kids_menu"}, {"id": "urn:tag:genre:place:restaurant:cafe"},
+            {"id": "urn:tag:nearby_attraction:qloo:cafes"}, {"id": "urn:tag:category:place:cafe"}, {"id": "urn:tag:decor:qloo:cafe_style"}]
+    assert [t["id"] for t in agent.place_tags(tags, "cafe")] == ["urn:tag:category:place:cafe", "urn:tag:nearby_attraction:qloo:cafes"]
+    stores = [{"id": "urn:tag:category:place:store"}, {"id": "urn:tag:category:place:record_store"}]
+    assert [t["id"] for t in agent.place_tags(stores, "record store")] == ["urn:tag:category:place:record_store"]
+
+
+# --- Venue relevance and vibe.
+
+def _place(name, *categories):
+    return {"name": name, "tags": [{"name": c, "type": "urn:tag:category:place"} for c in categories]}
+
+
+@pytest.mark.parametrize(("place", "keep"), [
+    (_place("The Ritz-Carlton, San Juan", "Wedding venue", "Hotel"), False),
+    (_place("Honu Kai Bed & Breakfast", "Hotel", "Bed breakfast"), False),
+    (_place("Whole Foods Market", "Bakery", "Grocery store", "Health food store", "Supermarket", "Organic food store"), False),
+    (_place("InStyle Wedding KYOTO", "Wedding chapel", "Banquet hall", "Wedding venue"), False),
+    (_place("University of Kent Conference and Events", "Conference center", "Event planner", "Event venue"), False),
+    (_place("Zaborin Ryokan", "Hotel", "Japanese restaurant", "Japanese inn"), True),
+    (_place("earth hostel", "Hostel", "Cafe"), True),
+    (_place("Museum of Art", "Art museum", "Tourist attraction"), True),
+    (_place("Kex Hostel Restaurant", "Restaurant"), True),
+])
+def test_venue_relevance(place, keep):
+    assert agent.is_relevant_place(place) is keep
+
+
+def test_vibe_keeps_mood_tags_only():
+    assert agent.vibe_tag({"name": "Lively", "type": "urn:tag:ambience:qloo"}) == "Lively"
+    assert agent.vibe_tag({"name": "Creative district", "type": "urn:tag:setting:qloo"}) == "Creative district"
+    for name, kind in [("Hair dryer", "amenity:qloo"), ("Telephone", "amenity:qloo"), ("Lunch", "dining_options:place"),
+                       ("Price level", "payments:place"), ("Drive thru", "service_type:qloo"), ("Anniversary", "event:place")]:
+        assert agent.vibe_tag({"name": name, "type": "urn:tag:" + kind}) is None
+
+
+def test_known_for_reads_naturally():
+    assert agent.known_for(["For the History", "With Kids", "Beaches"]) == ["history", "families with kids", "beaches"]
+
+
+def _at(address):
+    return {"name": "Spot", "properties": {"address": address}}
+
+
+def test_mislocated_city_is_skipped_for_the_spare():
+    city = {"name": "Doolin"}
+    pottstown = [_at(f"{i} High St Pottstown, PA 19464") for i in range(6)]
+    assert agent.mislocated(city, "Doolin, Pennsylvania US · near Stowe", pottstown)
+    assert not agent.mislocated(city, "Doolin, Clare IE", pottstown)  # no "near": the geocode agrees with the name
+    assert not agent.mislocated({"name": "Venice"}, "Venice, California US · near Marina del Rey",
+                                pottstown + [_at("1 Ocean Front Walk Venice, CA 90291")])
+    assert not agent.mislocated(city, "Doolin · near Stowe", pottstown[:3])  # too little evidence to judge
+    trace = []
+    built = [{"city": "A", "location": "A", "mislocated": False}, {"city": "Doolin", "location": "Doolin · near Stowe", "mislocated": True},
+             {"city": "B", "location": "B", "mislocated": False}, {"city": "C", "location": "C", "mislocated": False}]
+    assert [c["city"] for c in agent.located(built, 2, trace)] == ["A", "B"]
+    assert trace == ["skipped Doolin: Qloo's coordinates for it point to Stowe (no venue there lists Doolin in its address)"]
+
+
+@pytest.mark.parametrize(("word", "expected"), [("beaches", "beach"), ("galleries", "gallery"), ("cafes", "cafe"),
+                                                ("parks", "park"), ("glass", "glass"), ("boxes", "box"), ("art", "art")])
+def test_singular(word, expected):
+    assert agent.singular(word) == expected
+
+
+def test_shortlist_skips_a_town_next_to_a_pick():
+    san_juan = _dest("San Juan", "PR", 18.46, -66.10)
+    fajardo = _dest("Fajardo", "PR", 18.33, -65.65)   # ~50 km away, a different municipality
+    bogota = _dest("Bogota", "CO", 4.71, -74.07)
+    for i, c in enumerate([san_juan, fajardo, bogota]):
+        c["properties"]["geocode"]["admin1_region"] = c["name"]
+    assert [c["name"] for c in agent.unique_cities([san_juan, fajardo, bogota], 2)] == ["San Juan", "Bogota"]
+
+
+def test_no_cities_returns_a_clear_error_without_empty_follow_up_calls(monkeypatch):
+    seen = []
+    async def get(self, path, params):
+        seen.append(dict(params))
+        if path == "/search": return {"results": [{"entity_id": "e1", "name": params["query"]}]}
+        return {"results": {"entities": []}}
+    monkeypatch.setattr(agent.Qloo, "get", get)
+    body = c.post("/api/scout", json={"music": "Obscure", "country": "AQ"}).json()
+    assert body["error"].startswith("Qloo found no cities") and "country limit" in body["error"]
+    assert all(p.get("filter.results.entities", "x") for p in seen)  # never an empty filter (Qloo answers 400)
+
+
+def test_town_names_are_not_venues():
+    city = {"name": "San Simeon", "properties": {"geocode": {"admin1_region": "California", "country_code": "US"}}}
+    places = [{"name": "Cambria, California"}, {"name": "Hearst Castle"}, {"name": "Anytown, United States"}]
+    assert [p["name"] for p in agent.local_relevant(places, city, True)] == ["Hearst Castle"]
+
+
+def test_chat_rejects_numbers_no_tool_returned(monkeypatch):
+    """The model skipping the tool and inventing scores ("Barcelona 86/82") is sent back, then refused."""
+    sent = _script_llm(monkeypatch, [{"content": "Barcelona (86/82) suits you both."},
+                                     {"content": "Barcelona (86/82) really suits you both."}])
+    r = c.post("/api/chat", json={"messages": [{"role": "user", "content": "My partner loves Bad Bunny. Find a city for both."}]})
+    body = r.json()
+    assert body["reply"].startswith("Sorry, I couldn't ground that answer")
+    assert "82, 86" in sent[1][-1]["content"] and sent[1][-1]["role"] == "user"
+
+
+def test_chat_numbers_from_tool_output_are_allowed(monkeypatch):
+    _script_llm(monkeypatch, [{"content": "Off the record: 77 points."},
+                              _call("scout_cities", {"music": "Radiohead"}),
+                              {"content": "Your top city scores 50."}])  # FAKE_CITY affinity 0.5 → 50
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "I love Radiohead"}]}).json()
+    assert body["reply"] == "Your top city scores 50." and body["steps"][0].startswith("scout_cities(")
+
+
+def test_chat_numbers_from_the_conversation_are_allowed(monkeypatch):
+    _script_llm(monkeypatch, [{"content": "Yes, Glasgow's 83 came from Qloo."}])
+    history = [{"role": "user", "content": "Where?"}, {"role": "assistant", "content": "Glasgow scores 83."},
+               {"role": "user", "content": "Was 83 from Qloo?"}]
+    assert c.post("/api/chat", json={"messages": history}).json()["reply"] == "Yes, Glasgow's 83 came from Qloo."
+
+
+def test_blend_with_the_users_own_profile_is_rejected(monkeypatch):
+    sent = _script_llm(monkeypatch, [_call("blend_profiles", {"music": "Radiohead", "label": "Partner"}),
+                                     {"content": "Please tell me your partner's favorites."}])
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "Blend with my partner"}],
+                                     "profile": {"music": "Radiohead"}}).json()
+    assert "other person's own tastes" in sent[1][-1]["content"] and body["result"] is None

@@ -65,6 +65,7 @@ function bar(score, label) {
 
 function localSection(city) {
   const section = element("section", null, "local-section");
+  if (city.venue_filter?.length) section.append(element("p", `Spots picked for: ${city.venue_filter.join(" · ")}`, "venue-filter"));
   if (city.neighborhoods?.length) {
     section.append(element("h4", "Neighborhoods to explore"));
     const list = element("ul", null, "neighborhood-list");
@@ -183,8 +184,13 @@ function renderResults(result) {
   const matched = element("div", null, "matched-panel");
   matched.append(element("h3", "Your taste, connected"));
   const names = (result.matched || []).map(taste => taste.name);
-  names.push(...(result.lifestyle_tags || []).map(tag => `#${tag.name}`));
+  names.push(...(result.lifestyle_tags || []).map(tag => `#${tag.word || tag.name}`));
   matched.append(chips(names));
+  if (result.unmatched?.length) {
+    const missing = element("p", null, "unmatched-note");
+    missing.append(element("span", "Not found in Qloo: ", "muted"), chips(result.unmatched, "chip chip-missing"));
+    matched.append(missing);
+  }
   fragment.append(matched);
   if (result.narrative) {
     const narrative = element("section", null, "narrative-card");

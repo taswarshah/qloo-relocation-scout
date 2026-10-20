@@ -190,6 +190,9 @@ h2 { font-family: var(--display); font-size: clamp(1.6rem, 3vw, 2.15rem); line-h
 .matched-panel h3 { font-size: .85rem; margin-bottom: 9px; }
 .chips { display: flex; flex-wrap: wrap; gap: 7px; }
 .chip { background: var(--green-soft); border: 1px solid #d6e7da; color: var(--green); border-radius: 100px; padding: 4px 12px; font-size: .75rem; font-weight: 600; overflow-wrap: anywhere; animation: chip-pop .45s var(--ease) both; }
+.unmatched-note { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin: 10px 0 0; }
+.chip-missing { background: #fff; border-color: var(--line); color: var(--muted); text-decoration: line-through; text-decoration-color: #b9c4bf; }
+.venue-filter { margin: 0 0 8px; font-size: .74rem; font-weight: 600; color: var(--green-2); }
 .narrative-card { padding: 22px 24px; background: var(--green-soft); border-radius: 16px; margin-bottom: 22px; animation: rise-in .5s var(--ease) both; }
 .narrative-card h3 { font-size: 1rem; }
 .narrative-card p { margin-bottom: 0; font-size: .9rem; white-space: pre-line; }

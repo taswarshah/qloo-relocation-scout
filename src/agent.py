@@ -7,6 +7,7 @@ import time
 from collections import OrderedDict
 import unicodedata
 from collections import Counter, defaultdict
+from difflib import SequenceMatcher
 from typing import Any, TypedDict
 import httpx
 from dotenv import load_dotenv
@@ -81,12 +82,19 @@ class MatchedTaste(TypedDict):
     category: str
 
 
-class LifestyleTag(TypedDict):
-    """Resolved lifestyle signal and its original keyword."""
+class LifestyleTag(TypedDict, total=False):
+    """A lifestyle keyword resolved to Qloo tags.
+
+    Qloo ignores tags passed as `signal.interests.tags` when ranking destinations and places
+    (measured: same order, scores only shift down), so lifestyle words are applied as
+    `filter.tags` instead: a destination genre tag narrows the cities, place tags narrow the venues.
+    """
 
     id: str
     name: str
     word: str
+    destination_tag: str
+    place_tags: list[str]
 
 
 class Neighborhood(TypedDict):
@@ -119,7 +127,13 @@ class CityResult(TypedDict):
     drivers: list[TasteDriver]
     why: str
     radius_km: int | None
+    venue_filter: list[str]
+    mislocated: bool
     coverage: dict[str, int]
+
+
+# find_places result: (places, by_radius, radius_km, names of the lifestyle filters that shaped them)
+Found = tuple[list[QlooEntity], bool, int | None, list[str]]
 
 
 class ComparisonRow(TypedDict):
@@ -261,14 +275,17 @@ class Qloo:
         return data
 
     async def search(self, query: str, entity_type: str) -> QlooEntity | None:
-        """Resolve one free-text taste to an entity."""
-        data = await self.get("/search", {"query": query, "types": entity_type, "take": 1})
-        results = data.get("results") or []
-        return results[0] if results else None
+        """Resolve one free-text taste to the closest-named entity, or None if nothing is close.
 
-    async def tags(self, query: str) -> list[QlooEntity]:
-        """Resolve a lifestyle word to a small set of candidate tags."""
-        data = await self.get("/v2/tags", {"filter.query": query, "take": 5})
+        Qloo search always returns *something* ("zzqxv qwerty" → the band Qwerty), so the top
+        few results are checked against the query and weak matches are rejected.
+        """
+        data = await self.get("/search", {"query": query, "types": entity_type, "take": 5})
+        return best_match(query, data.get("results") or [])
+
+    async def tags(self, query: str, parent: str = "urn:entity:place") -> list[QlooEntity]:
+        """Candidate tags for a lifestyle word, limited to tags that apply to `parent` entities."""
+        data = await self.get("/v2/tags", {"filter.query": query, "filter.parents.types": parent, "take": 8})
         return (data.get("results") or {}).get("tags", [])
 
     async def insights(self, **params: str | int) -> list[QlooEntity]:
@@ -281,7 +298,7 @@ NOISE = re.compile(r"^(place|morning|afternoon|evening|night|routine visit|comme
 
 VIBE_JUNK = re.compile(r"midday|convenience|delivery|disinfect|contact|mask|staff|sanitiz|temperature|alcohol|reservation|payment|credit|debit|wheelchair|restroom|parking|checks?$|dine-?in"
                        r"|dining drinking|full bar|^bars?$|tourist attraction|outdoor seating|good for|^restaurant$"
-                       r"|onsite|free admission|^moderate$|^inexpensive$|^expensive$")
+                       r"|onsite|free admission|^moderate$|^inexpensive$|^expensive$|large group|groups? of friends|family friendly|^social$")
 
 MAX_ITEMS_PER_FIELD = 5
 MAX_ENTITIES = 12
@@ -289,6 +306,7 @@ MAX_TAGS = 5
 ADMIN_PREFIX = re.compile(r"^(?:upzs?|localidad)(?:\s+|$)", re.IGNORECASE)
 COUNTRY_ALIASES = {
     "US": ("united states", "united states of america", "usa", "u.s.a.", "estados unidos"),
+    "PR": ("puerto rico",),
     "GT": ("guatemala",),
     "CO": ("colombia",),
     "CA": ("canada",),
@@ -318,6 +336,45 @@ def normalize(value: str) -> str:
     """Fold accents, case and whitespace for deterministic label comparisons."""
     plain = "".join(char for char in unicodedata.normalize("NFKD", value) if not unicodedata.combining(char))
     return " ".join(plain.casefold().split())
+
+
+STOPWORDS = {"the", "a", "an", "of", "and", "in", "on", "la", "le", "el", "de", "&"}
+
+
+def _tokens(value: str) -> list[str]:
+    words = re.sub(r"[^\w& ]", " ", normalize(value)).split()
+    return [t for t in words if t not in STOPWORDS] or words  # "The The", "A" are names too
+
+
+def match_quality(query: str, name: str) -> float:
+    """How well an entity name answers a query, 0-1. Every meaningful query word must appear
+    (typos allowed) for a high score, so extra garbage words sink the match."""
+    q, n = _tokens(query), _tokens(name)
+    if not q or not n:
+        return 0.0
+    if q == n:
+        return 1.0
+    whole = SequenceMatcher(None, " ".join(q), " ".join(n)).ratio()
+    found = sum(1 for word in q if any(SequenceMatcher(None, word, other).ratio() >= 0.85 for other in n))
+    coverage = found / len(q)
+    return max(whole, 0.9 * coverage if coverage == 1 else 0.6 * coverage)
+
+
+MIN_MATCH = 0.8
+
+
+def best_match(query: str, results: list[QlooEntity]) -> QlooEntity | None:
+    """The closest-named result (ties keep Qloo's order), or None below MIN_MATCH."""
+    scored = [(match_quality(query, r.get("name") or ""), -i, r) for i, r in enumerate(results)]
+    if not scored:
+        return None
+    score, _, pick = max(scored, key=lambda item: item[:2])
+    return pick if score >= MIN_MATCH else None
+
+
+def display_name(name: str) -> str:
+    """Short label for long venue names ("Biryani Zone, Marathahalli, , Hyderabadi Dum..." → "Biryani Zone")."""
+    return name.split(",")[0].strip() if len(name) > 40 and "," in name else name
 
 
 def clean_neighborhood_name(name: str | None) -> str:
@@ -351,6 +408,11 @@ def country_code(value: str | None) -> str | None:
         return value.strip().upper()
     folded = normalize(value)
     return next((code for code, aliases in COUNTRY_ALIASES.items() if folded in aliases), None)
+
+
+def address_text(place: QlooEntity) -> str:
+    address = (place.get("properties") or {}).get("address") or ""
+    return address if isinstance(address, str) else ", ".join(v for v in address.values() if isinstance(v, str))
 
 
 def place_matches_city(place: QlooEntity, city: QlooEntity, by_radius: bool = False) -> bool:
@@ -389,11 +451,15 @@ def place_matches_city(place: QlooEntity, city: QlooEntity, by_radius: bool = Fa
     return True
 
 
+LODGING_CATEGORY = re.compile(r"\b(hotel|motel|lodging|hostel|inn|ryokan|bed (and )?breakfast|guest ?house|resort|"
+                              r"extended stay|vacation (home )?rental|holiday (home|apartment)|serviced apartment)\b")
 IRRELEVANT_CATEGORY = re.compile(
     r"\b(hotel|motel|lodging|resort hotel|extended stay|apartment|condominium|real estate|school|educational|"
     r"kindergarten|preschool|university|college|office|supermarket|grocery|discount store|dollar store|variety store|convenience store|gas station|fuel|subway station|train station|bus (stop|station)|transit|"
     r"rest stop|parking|bank|atm|hospital|clinic|medical|dentist|pharmacy|car (rental|dealer|repair|wash)|"
-    r"storage|post office|government|courthouse|police|embassy|conference center|warehouse|factory|airport)\b")
+    r"storage|post office|government|courthouse|police|embassy|conference center|warehouse|factory|airport|"
+    r"wedding|banquet|event planner|meeting planning|student housing|dormitory|residence hall|tutoring|child care|day care|language school|"
+    r"health food store|organic food store|natural goods|delivery service|rental agency|travel agency)\b")
 
 
 def place_categories(place: QlooEntity) -> list[str]:
@@ -403,7 +469,7 @@ def place_categories(place: QlooEntity) -> list[str]:
 
 
 LODGING_NAME = re.compile(r"\b(hotel|motel|inn|suites|resort|lodge|apartments?)\b", re.IGNORECASE)
-HOSPITALITY_NAME = re.compile(r"\b(bar|restaurant|caf[eé]|kitchen|lounge|bistro|brasserie|pub|grill|rooftop)\b", re.IGNORECASE)
+HOSPITALITY_NAME = re.compile(r"\b(bar|restaurant|caf[eé]|coffee|kitchen|lounge|bistro|brasserie|pub|grill|rooftop|izakaya|eatery)\b", re.IGNORECASE)
 ADDRESS_LIKE = re.compile(r"^\d|#|\b(calle|avenida|street|st\.|road|rd\.)\s*\d", re.IGNORECASE)
 
 
@@ -416,19 +482,37 @@ def is_relevant_place(place: QlooEntity) -> bool:
     if ADDRESS_LIKE.search(name):
         return False
     categories = [normalize(c) for c in place_categories(place) if c]
-    # Lodging by name ("Kimpton Hotel Monaco"), unless the name or a category says it's also a bar/restaurant.
-    if LODGING_NAME.search(name) and not (HOSPITALITY_NAME.search(name) or any(HOSPITALITY_NAME.search(c) for c in categories)):
+    hospitality = HOSPITALITY_NAME.search(name) or any(HOSPITALITY_NAME.search(c) for c in categories)
+    # Lodging by name ("The Nishat Hotel") unless it's really a bar/restaurant: the name says so ("Kex Hostel
+    # Restaurant") or its categories do without also saying hotel. Lodging by category ("Hotel", "Bed breakfast")
+    # unless a category also says restaurant/café (a ryokan with a dining room).
+    lodging_category = any(LODGING_CATEGORY.search(c) for c in categories)
+    if LODGING_NAME.search(name) and not HOSPITALITY_NAME.search(name) and (lodging_category or not hospitality):
+        return False
+    if lodging_category and not hospitality:
         return False
     if not categories:
         return True
-    return any(not IRRELEVANT_CATEGORY.search(c) for c in categories)
+    # Mostly-irrelevant venues go (a supermarket that also has a "Bakery" tag, a hotel that's a "Wedding venue").
+    irrelevant = sum(1 for c in categories if IRRELEVANT_CATEGORY.search(c))
+    return irrelevant * 2 <= len(categories) or (bool(hospitality) and irrelevant < len(categories))
+
+
+# Tag kinds that describe character and mood. Everything else on a venue (amenities, payments,
+# service options, room types, menus, meal times) reads as noise in a "local vibe" list.
+VIBE_KINDS = ("ambience", "neighborhood_characteristic", "setting", "decor", "culinary_style", "inclusivity", "interests")
+VIBE_BLAND = re.compile(r"^(clean|unique|commercial|business|touristic|tourists|modern|casual|place|urban|"
+                        r"city center|central|convenient|natural|traditional|authentic)$")
 
 
 def vibe_tag(tag: QlooEntity) -> str | None:
-    """Keep descriptive tags, excluding category, service, numeric and short junk."""
+    """Keep descriptive mood/character tags; drop amenities, services, numbers and filler."""
     name = (tag.get("name") or "").strip()
+    kind = (tag.get("type") or "").casefold()
+    if kind and not any(k in kind for k in VIBE_KINDS):
+        return None
     if (len(name) < 3 or len(name) > 28 or any(char.isdigit() for char in name) or VIBE_JUNK.search(name.casefold())
-            or NOISE.search(name.casefold()) or "category" in (tag.get("type") or "").casefold()):
+            or NOISE.search(name.casefold())):
         return None
     return name
 
@@ -446,9 +530,11 @@ def affinity(entity: QlooEntity) -> float:
 def local_relevant(places: list[QlooEntity], city: QlooEntity, by_radius: bool = False) -> list[QlooEntity]:
     """Places that are in the right area and worth recommending."""
     city_key = normalize(city.get("name") or "")
-    def is_city_itself(p: QlooEntity) -> bool:  # e.g. a venue literally named "San Juan, Puerto Rico"
+    geocode = (city.get("properties") or {}).get("geocode") or {}
+    regions = {normalize(r) for r in [geocode.get("admin1_region") or "", *COUNTRY_ALIASES.get(geocode.get("country_code") or "", ())] if r}
+    def is_city_itself(p: QlooEntity) -> bool:  # a "venue" that is a town: "San Juan, Puerto Rico", "Cambria, California"
         name = normalize(p.get("name") or "")
-        return name == city_key or name.startswith(city_key + ",")
+        return name == city_key or name.startswith(city_key + ",") or any(name.endswith(", " + r) for r in regions)
     return [p for p in places if place_matches_city(p, city, by_radius) and is_relevant_place(p)
             and not is_city_itself(p)]
 
@@ -461,54 +547,162 @@ def summarize_places(places: list[QlooEntity], city: QlooEntity,
     vibe: Counter[str] = Counter()
     local_places = sorted(local_relevant(places, city, by_radius), key=affinity, reverse=True)
     for place in local_places:
-        name = (place.get("name") or "").strip()
+        name = display_name((place.get("name") or "").strip())
         neighborhood = clean_neighborhood_name((place.get("properties") or {}).get("neighborhood"))
         if name and neighborhood:
             key = normalize(neighborhood)
             labels.setdefault(key, neighborhood)
             if name not in hoods[key]:
                 hoods[key].append(name)
-        for tag in (place.get("tags") or [])[:8]:
-            descriptive = vibe_tag(tag)
-            if descriptive:
-                vibe[descriptive] += 1
+        for descriptive in {v for tag in place.get("tags") or [] if (v := vibe_tag(tag))}:
+            vibe[descriptive] += 1
     ranked_hoods = sorted(hoods, key=lambda key: -len(hoods[key]))[:3]
     neighborhoods: list[Neighborhood] = [{"name": labels[key], "spots": hoods[key][:4]} for key in ranked_hoods]
     top_spots: list[str] = []
     seen_spots: set[str] = set()
     for place in sorted(local_places, key=affinity, reverse=True):
-        name = (place.get("name") or "").strip()
+        name = display_name((place.get("name") or "").strip())
         key = normalize(name)
         if key and key not in seen_spots:
             seen_spots.add(key)
             top_spots.append(name)
         if len(top_spots) == 4:
             break
-    return neighborhoods, top_spots, [name for name, _ in vibe.most_common(6)]
+    # Distinctive words first ("Creative district" beats "Casual"); bland ones only fill gaps.
+    ranked_vibe = sorted(vibe, key=lambda v: (bool(VIBE_BLAND.match(v.casefold())), -vibe[v]))
+    return neighborhoods, top_spots, ranked_vibe[:6]
+
+
+# Lifestyle word → Qloo destination genre tag (the small fixed set Qloo puts on cities).
+DESTINATION_TAGS: list[tuple[re.Pattern[str], str]] = [(re.compile(pattern), "urn:tag:genre:destination:" + tag) for pattern, tag in [
+    (r"\b(beach|surf|ocean|seaside|coast|island)", "beaches"),
+    (r"\b(nature|forest|wildlife|parks?\b|green)", "nature"),
+    (r"\b(hik|trail|outdoor|camp|climb|kayak|cycl|bik|adventure)", "outdoor_activities"),
+    (r"\b(ski|snow)", "snow_ski"),
+    (r"\b(nightlife|club|party|bars?\b|cocktail|danc)", "great_nightlife"),
+    (r"\b(art|galler|museum|culture|design)", "art_culture"),
+    (r"\b(theat|concert|jazz|opera|perform|live music|comedy)", "entertainment_performing_arts"),
+    (r"\b(wine|vineyard)", "wine_country"),
+    (r"\b(kid|family|families|child)", "kids"),
+    (r"\b(food|restaurant|cuisine|cafe|coffee|dining|vegan)", "foodie_destination"),
+    (r"\b(histor|heritage|old town|castle)", "history"),
+    (r"\b(shop|boutique|fashion|market)", "great_shopping"),
+    (r"\barchitect", "great_architecture"),
+    (r"\b(romant|couple)", "romantic_getaways"),
+    (r"\b(scenic|view|picturesque|lake|landscape)", "scenic_picturesque"),
+    (r"\b(urban|city|walkab|metropol|cowork|tech|transit)", "urban_destinations"),
+]]
+# Lifestyle words whose literal tag search lands on the wrong thing ("kids" → "Kids' menu").
+PLACE_TAG_QUERY = {"kids": "good for kids", "kid": "good for kids", "family": "good for kids", "children": "good for kids",
+                   "vinyl": "record store", "records": "record store", "coffee": "coffee shop", "history": "history museum"}
+# Venue tag kinds that describe what a place *is* or is good for, most specific first.
+PLACE_TAG_KINDS = ("category:place:", "genre:place:", "activities:place:", "children:place:good", "good_for:qloo:",
+                   "inclusivity:place:", "ambience:qloo:", "neighborhood_characteristic:qloo:", "setting:qloo:",
+                   "dietary_option:qloo:", "nearby_attraction:qloo:")
+
+
+def destination_tag(word: str) -> str | None:
+    folded = normalize(word)
+    return next((tag for pattern, tag in DESTINATION_TAGS if pattern.search(folded)), None)
+
+
+def singular(word: str) -> str:
+    """"beaches" → "beach", "galleries" → "gallery", "cafes" → "cafe" (tag search matches singulars best)."""
+    folded = normalize(word)
+    if len(folded) <= 3:
+        return folded
+    if re.search(r"(ch|sh|x|ss|z)es$", folded):
+        return folded[:-2]
+    if folded.endswith("ies"):
+        return folded[:-3] + "y"
+    return folded[:-1] if folded.endswith("s") and not folded.endswith("ss") else folded
+
+
+def place_tags(candidates: list[QlooEntity], query: str = "", limit: int = 2) -> list[QlooEntity]:
+    """The most specific venue tags among Qloo's candidates (no hotel/restaurant sub-genres, decor, menus),
+    keeping only tags that name every word of the query ("record store" → record_store, not plain "store")."""
+    words = [w for w in re.findall(r"\w+", normalize(query)) if w not in STOPWORDS and w != "for"]
+    def rank(tag: QlooEntity) -> int | None:
+        tid = (tag.get("id") or "").removeprefix("urn:tag:")
+        if ":hotel:" in tid or ":restaurant:" in tid or not all(w in tid.rsplit(":", 1)[-1] for w in words):
+            return None
+        return next((i for i, kind in enumerate(PLACE_TAG_KINDS) if tid.startswith(kind)), None)
+    ranked = sorted(((r, i, t) for i, t in enumerate(candidates) if (r := rank(t)) is not None), key=lambda x: x[:2])
+    return [t for _, _, t in ranked[:limit]]
+
+
+def book_author(book: QlooEntity) -> str | None:
+    """Author name from a book's disambiguation ("2018, Sally Rooney")."""
+    parts = (book.get("disambiguation") or "").split(",", 1)
+    author = " ".join(parts[1].split()) if len(parts) == 2 else ""
+    return author or None
+
+
+async def resolve_book(q: Qloo, name: str) -> tuple[MatchedTaste | None, str]:
+    """Qloo rejects books as destination signals (HTTP 400; ignored when mixed with others), but
+    accepts people. So a book title or an author name resolves to the author as a person entity."""
+    found = await q.get("/search", {"query": name, "types": "urn:entity:book,urn:entity:person", "take": 5})
+    hit = best_match(name, found.get("results") or [])
+    if not hit:
+        return None, f"search: '{name}' → no match"
+    if "urn:entity:person" in (hit.get("types") or []):
+        return {"id": hit["entity_id"], "name": hit["name"], "category": "books"}, f"search: '{name}' → author {hit['name']} (person)"
+    author = book_author(hit)
+    person = await q.search(author, "urn:entity:person") if author else None
+    if not person:
+        return None, f"search: '{name}' → {hit['name']} (book), but Qloo can't rank cities by books alone"
+    return ({"id": person["entity_id"], "name": person["name"], "category": "books"},
+            f"search: '{name}' → {hit['name']} (book) → author {person['name']} (person)")
+
+
+async def resolve_taste(q: Qloo, category: str, name: str) -> tuple[MatchedTaste | None, str]:
+    """One free-text favorite → a matched taste (or None) and a trace line."""
+    if category == "books":
+        return await resolve_book(q, name)
+    entity = await q.search(name, CATEGORY_TYPES[category])
+    if not entity:
+        return None, f"search: '{name}' → no match"
+    label = display_name(entity["name"])
+    return {"id": entity["entity_id"], "name": label, "category": category}, f"search: '{name}' → {label} ({category})"
+
+
+async def resolve_lifestyle(q: Qloo, word: str) -> tuple[LifestyleTag | None, str]:
+    """One lifestyle word → a destination genre filter and venue tag filters."""
+    query = PLACE_TAG_QUERY.get(normalize(word), singular(word))
+    venue = place_tags(await q.tags(query), query)
+    city_tag = destination_tag(word)
+    if not venue and not city_tag:
+        return None, f"tags: '{word}' → no match"
+    tag: LifestyleTag = {"id": (venue[0]["id"] if venue else city_tag) or "", "word": word,
+                         "name": venue[0]["name"] if venue else word.title(), "place_tags": [t["id"] for t in venue]}
+    if city_tag:
+        tag["destination_tag"] = city_tag
+    parts = ([f"cities {city_tag.rsplit(':', 1)[-1]}"] if city_tag else []) + ([f"venues {', '.join(t['id'].removeprefix('urn:tag:') for t in venue)}"] if venue else [])
+    return tag, f"tags: '{word}' → filter " + " · ".join(parts)
 
 
 async def resolve_profile(q: Qloo, profile: dict[str, str], trace: list[str]) -> tuple[list[MatchedTaste], list[LifestyleTag]]:
-    """Step 1: resolve free-text likes to Qloo entity IDs and lifestyle words to tag IDs."""
-    entities: list[MatchedTaste] = []
-    tags: list[LifestyleTag] = []
+    """Step 1: resolve free-text likes to Qloo entity IDs and lifestyle words to tag filters (one parallel round)."""
     jobs = [(category, name) for category in CATEGORY_TYPES for name in split(profile.get(category, ""))][:MAX_ENTITIES]
     words = split(profile.get("lifestyle", ""))[:MAX_TAGS]
-    # Entity search and tag lookup are independent: one parallel round instead of two.
-    results = await asyncio.gather(*[q.search(name, CATEGORY_TYPES[category]) for category, name in jobs],
-                                   *[q.tags(word) for word in words])
-    found, tag_results = results[:len(jobs)], results[len(jobs):]
-    for (category, name), entity in zip(jobs, found):
-        if entity:
-            entities.append({"id": entity["entity_id"], "name": entity["name"], "category": category})
-            trace.append(f"search: '{name}' → {entity['name']} ({category})")
-        else:
-            trace.append(f"search: '{name}' → no match")
-    for word, candidates in zip(words, tag_results):
-        pick = next((tag for tag in candidates if "destination" in tag["id"]), None) or (candidates[0] if candidates else None)
-        if pick:
-            tags.append({"id": pick["id"], "name": pick["name"], "word": word})
-            trace.append(f"tags: '{word}' → {pick['id']}")
+    results = await asyncio.gather(*[resolve_taste(q, category, name) for category, name in jobs],
+                                   *[resolve_lifestyle(q, word) for word in words])
+    entities: list[MatchedTaste] = []
+    tags: list[LifestyleTag] = []
+    for found, line in results[:len(jobs)]:
+        trace.append(line)
+        if found and found["id"] not in {e["id"] for e in entities}:
+            entities.append(found)
+    for found, line in results[len(jobs):]:
+        trace.append(line)
+        if found:
+            tags.append(found)
     return entities, tags
+
+
+def unmatched(trace: list[str]) -> list[str]:
+    """Favorites Qloo couldn't match, for the UI ("not found: ...")."""
+    return [m.group(1) for line in trace if (m := re.match(r"(?:search|tags): '(.+)' → (?:no match|.* \(book\), but Qloo can't rank cities by books alone)$", line))]
 
 async def scout(profile: dict[str, str], n_cities: int = 4) -> ScoutResult:
     """Scout taste-matched cities (pooled HTTP client is shared and kept alive)."""
@@ -523,13 +717,16 @@ async def _scout(q: Qloo, profile: dict[str, str], n_cities: int) -> ScoutResult
     (entities, tags), candidate = await asyncio.gather(
         resolve_profile(q, profile, trace),
         q.search(candidate_name, "urn:entity:destination") if candidate_name else _none())
-    if not entities and not tags:
+    if not entities:
         if q.failed:  # upstream trouble, not a genuine no-match
             return {"error": "Qloo is not responding right now, so we couldn't read your tastes. Please try again shortly.",
                     "trace": trace, "health": q.health()}
-        return {"error": "Couldn't match any of your tastes in Qloo. Try specific artists, films or restaurants.", "trace": trace,
-                "health": q.health()}
-    signals = _signals(entities, tags)
+        missed = unmatched(trace)
+        hint = (" Lifestyle words narrow the list, but Qloo ranks cities by the specific things you love, "
+                "so add at least one artist, film, show, book, restaurant or brand.") if tags else ""
+        return {"error": "Couldn't match any of your favorites in Qloo." + (f" Not found: {', '.join(missed)}." if missed else "") + hint,
+                "trace": trace, "unmatched": missed, "health": q.health()}
+    signals = _signals(entities)
     country_filter: Parameters = {}
     if profile.get("country"):
         country_filter["filter__geocode__country_code"] = profile["country"].upper()
@@ -537,15 +734,21 @@ async def _scout(q: Qloo, profile: dict[str, str], n_cities: int) -> ScoutResult
     t1 = time.perf_counter()
     # Round 2: rank destinations on the combined profile (+ score the user's candidate city).
     cand_id = candidate["entity_id"] if candidate else None
-    ranked = q.insights(filter__type="urn:entity:destination", take=n_cities * 3, **signals, **country_filter)
+    ranked = rank_destinations(q, n_cities, signals, country_filter, tags, trace)
     if cand_id:
         destinations, cand_hits = await asyncio.gather(
             ranked, q.insights(filter__type="urn:entity:destination", filter__results__entities=cand_id, take=1, **signals))
     else:
         destinations, cand_hits = await ranked, []
-    trace.append(f"insights(destination, all signals) → {len(destinations)} candidates")
     # With a country filter the user asked for one country, so only spread across its regions.
-    cities = unique_cities(destinations, n_cities, max_per_country=None if country_filter else 2)
+    # Spare cities, in case Qloo's coordinates for a pick turn out to be somewhere else (see mislocated).
+    cities = unique_cities(destinations, n_cities + SPARE_CITIES, max_per_country=None if country_filter else 2)
+    if not cities:
+        if q.failed:
+            return {"error": "Qloo is not responding right now. Please try again shortly.", "trace": trace, "health": q.health()}
+        return {"error": "Qloo found no cities for this mix of tastes" + (" in that country" if country_filter else "")
+                         + ". Try other favorites" + (" or remove the country limit." if country_filter else "."),
+                "matched": entities, "lifestyle_tags": tags, "unmatched": unmatched(trace), "trace": trace, "health": q.health()}
     cand_entity = cand_hits[0] if cand_hits else None
     if cand_entity:
         trace.append(f"insights(destination, filter.results.entities={cand_entity['name']}) → {pct(affinity(cand_entity))}/100")
@@ -561,7 +764,7 @@ async def _scout(q: Qloo, profile: dict[str, str], n_cities: int) -> ScoutResult
     ids = ",".join(c["entity_id"] for c in shown)
     attribution = [q.insights(filter__type="urn:entity:destination", signal__interests__entities=e["id"],
                               filter__results__entities=ids, take=len(shown)) for e in entities]
-    place_jobs = [find_places(q, c, signals) for c in shown]
+    place_jobs = [find_places(q, c, signals, tags) for c in shown]
     gathered = await asyncio.gather(*attribution, *place_jobs)
     # Keyed by Qloo entity ID so two tastes with the same display name never overwrite each other.
     # An empty result means the call failed (the filter always returns the shown cities), so that
@@ -575,15 +778,15 @@ async def _scout(q: Qloo, profile: dict[str, str], n_cities: int) -> ScoutResult
         cand_result = next(b for b in built if b["city"] == cand_entity["name"])
     else:
         cand_result = built.pop() if cand_entity else None
-    results = built
+    results = located(built, n_cities, trace)
     t3 = time.perf_counter()
     narrative = await llm_summary(profile, results)
     timings = {"resolve_ms": round((t1 - t0) * 1000), "rank_ms": round((t2 - t1) * 1000),
                "neighborhoods_ms": round((t3 - t2) * 1000), "total_ms": round((time.perf_counter() - t0) * 1000),
                "qloo_calls": q.calls, "cache_hits": q.cache_hits, "qloo_failed": q.failed}
     trace.append(f"done in {timings['total_ms']} ms · {q.calls} Qloo calls · {q.cache_hits} cache hits")
-    out: ScoutResult = {"matched": entities, "lifestyle_tags": tags, "cities": results, "narrative": narrative,
-                        "trace": trace, "timings": timings, "health": q.health()}
+    out: ScoutResult = {"matched": entities, "lifestyle_tags": tags, "unmatched": unmatched(trace), "cities": results,
+                        "narrative": narrative, "trace": trace, "timings": timings, "health": q.health()}
     if q.failed:
         out["warning"] = ("Some Qloo requests failed or timed out, so these results may be incomplete. "
                           "Try again in a moment.")
@@ -597,13 +800,33 @@ async def _none() -> None:
     return None
 
 
-def _signals(entities: list[MatchedTaste], tags: list[LifestyleTag]) -> Parameters:
-    signals: Parameters = {}
-    if entities:
-        signals["signal__interests__entities"] = ",".join(entity["id"] for entity in entities)
-    if tags:
-        signals["signal__interests__tags"] = ",".join(tag["id"] for tag in tags)
-    return signals
+def _signals(entities: list[MatchedTaste]) -> Parameters:
+    """Taste signals. Lifestyle tags are applied as filters, not signals (see LifestyleTag)."""
+    return {"signal__interests__entities": ",".join(entity["id"] for entity in entities)} if entities else {}
+
+
+def _tag_filter(tags: list[LifestyleTag], key: str) -> Parameters:
+    ids = list(dict.fromkeys(i for tag in tags for i in ([tag[key]] if isinstance(tag.get(key), str) else tag.get(key) or [])))
+    return {"filter__tags": ",".join(ids)} if ids else {}
+
+
+async def rank_destinations(q: Qloo, n_cities: int, signals: Parameters, country_filter: Parameters,
+                            tags: list[LifestyleTag], trace: list[str], take: int | None = None) -> list[QlooEntity]:
+    """Cities ranked by taste affinity, narrowed to the lifestyle's destination genres (any of them).
+    If the genres leave too few cities, the rest of the list comes from the unfiltered ranking."""
+    take = take or n_cities * 3
+    genre = _tag_filter(tags, "destination_tag")
+    destinations = await q.insights(filter__type="urn:entity:destination", take=take, **signals, **country_filter, **genre)
+    if genre:
+        names = ", ".join(dict.fromkeys(t["destination_tag"].rsplit(":", 1)[-1].replace("_", " ") for t in tags if t.get("destination_tag")))
+        trace.append(f"insights(destination, taste signals, filter.tags={names}) → {len(destinations)} candidates")
+        if len(_distinct(destinations)) < n_cities:
+            more = await q.insights(filter__type="urn:entity:destination", take=take, **signals, **country_filter)
+            destinations += more
+            trace.append(f"insights(destination, taste signals) → {len(more)} more (lifestyle filter was too narrow)")
+    else:
+        trace.append(f"insights(destination, taste signals) → {len(destinations)} candidates")
+    return destinations
 
 
 async def blend(profile_a: dict[str, str], profile_b: dict[str, str], n_cities: int = 4,
@@ -618,32 +841,32 @@ async def blend(profile_a: dict[str, str], profile_b: dict[str, str], n_cities: 
     trace: list[str] = []
     t0 = time.perf_counter()
     (ea, ta), (eb, tb) = await asyncio.gather(resolve_profile(q, profile_a, trace), resolve_profile(q, profile_b, trace))
-    if not (ea or ta) or not (eb or tb):
-        who = labels[0] if not (ea or ta) else labels[1]
-        return {"error": f"Couldn't match any of {who}'s tastes in Qloo.", "trace": trace, "health": q.health()}
+    if not ea or not eb:
+        who = labels[0] if not ea else labels[1]
+        return {"error": f"Couldn't match any of {who}'s favorites in Qloo. Name at least one artist, film, show, book, "
+                         "restaurant or brand.", "trace": trace, "health": q.health()}
     country = (profile_a.get("country") or profile_b.get("country") or "").upper()
     country_filter: Parameters = {"filter__geocode__country_code": country} if country else {}
-    combined = _signals(ea + [e for e in eb if e["id"] not in {x["id"] for x in ea}],
-                        ta + [t for t in tb if t["id"] not in {x["id"] for x in ta}])
-    destinations = await q.insights(filter__type="urn:entity:destination", take=n_cities * 4, **combined, **country_filter)
+    combined = _signals(ea + [e for e in eb if e["id"] not in {x["id"] for x in ea}])
+    both_tags = ta + tb
+    destinations = await rank_destinations(q, n_cities * 3, combined, country_filter, both_tags, trace, take=n_cities * 4)
     pool = unique_cities(destinations, n_cities * 3)
-    trace.append(f"insights(destination, both profiles) → {len(pool)} candidate cities")
     if not pool:
         return {"error": "Qloo found no destinations for this pair of profiles.", "trace": trace, "health": q.health()}
     ids = ",".join(c["entity_id"] for c in pool)
     hits_a, hits_b = await asyncio.gather(
-        q.insights(filter__type="urn:entity:destination", filter__results__entities=ids, take=len(pool), **_signals(ea, ta)),
-        q.insights(filter__type="urn:entity:destination", filter__results__entities=ids, take=len(pool), **_signals(eb, tb)))
+        q.insights(filter__type="urn:entity:destination", filter__results__entities=ids, take=len(pool), **_signals(ea)),
+        q.insights(filter__type="urn:entity:destination", filter__results__entities=ids, take=len(pool), **_signals(eb)))
     score_a = {m["entity_id"]: affinity(m) for m in hits_a}
     score_b = {m["entity_id"]: affinity(m) for m in hits_b}
     trace.append(f"insights(destination, filter.results.entities=pool) scored separately for {labels[0]} and {labels[1]}")
     ranked = sorted(pool, key=lambda c: (-min(score_a.get(c["entity_id"], 0), score_b.get(c["entity_id"], 0)), -affinity(c)))
-    shown = ranked[:n_cities]
-    found = await asyncio.gather(*[find_places(q, c, combined) for c in shown])
+    shown = ranked[:n_cities + SPARE_CITIES]
+    found = await asyncio.gather(*[find_places(q, c, combined, both_tags) for c in shown])
     per_person = {"person-a": score_a, "person-b": score_b} if hits_a and hits_b else {}
     people: list[MatchedTaste] = [{"id": "person-a", "name": labels[0], "category": "person"},
                                   {"id": "person-b", "name": labels[1], "category": "person"}]
-    cities = [build_city(c, f, per_person, people) for c, f in zip(shown, found)]
+    cities = located([build_city(c, f, per_person, people) for c, f in zip(shown, found)], n_cities, trace)
     total = round((time.perf_counter() - t0) * 1000)
     trace.append(f"done in {total} ms · {q.calls} Qloo calls · {q.cache_hits} cache hits")
     out: ScoutResult = {"matched": ea + eb, "lifestyle_tags": ta + tb, "cities": cities, "narrative": None, "trace": trace,
@@ -658,22 +881,22 @@ async def spots(profile: dict[str, str], city_name: str, focus: str = "") -> dic
     """Zoom into one city for this profile, optionally nudged by a focus keyword ("coffee", "jazz bars")."""
     q = Qloo()
     trace: list[str] = []
-    (entities, tags), city_hit, focus_tags = await asyncio.gather(
+    (entities, tags), city_hit, focus_hit = await asyncio.gather(
         resolve_profile(q, profile, trace), q.search(city_name[:60], "urn:entity:destination"),
-        q.tags(focus[:40]) if focus else _none())
+        resolve_lifestyle(q, focus[:40]) if focus else _none())
     if not city_hit:
         return {"error": f"Couldn't find '{city_name}' as a destination in Qloo.", "health": q.health()}
-    focus_tag = (focus_tags or [None])[0]
-    if focus_tag:
-        tags = tags + [{"id": focus_tag["id"], "name": focus_tag["name"], "word": focus}]
-        trace.append(f"tags: '{focus}' → {focus_tag['id']}")
-    if not entities and not tags:
-        return {"error": "Couldn't match any tastes in Qloo.", "health": q.health()}
-    signals = _signals(entities, tags)
+    focus_tag = focus_hit[0] if focus_hit else None
+    if focus_hit:
+        trace.append(focus_hit[1])
+    if not entities:
+        return {"error": "Couldn't match any of your favorites in Qloo.", "health": q.health()}
+    signals = _signals(entities)
     scored = await q.insights(filter__type="urn:entity:destination", filter__results__entities=city_hit["entity_id"],
                               take=1, **signals)
     city = scored[0] if scored else city_hit
-    places, by_radius, radius_km = await find_places(q, city, signals)
+    # A focus ("coffee", "jazz bars") narrows venues on its own; otherwise the profile's lifestyle does.
+    places, by_radius, radius_km = (await find_places(q, city, signals, [focus_tag] if focus_tag else tags))[:3]
     neighborhoods, top_spots, vibe = summarize_places(places, city, by_radius)
     trace.append(f"insights(place, near {city.get('name')}) → {len(places)} venues")
     return {"city": city.get("name"), "affinity": round(affinity(city), 3), "focus": focus_tag["name"] if focus_tag else None,
@@ -717,13 +940,17 @@ def near(a: QlooEntity, b: QlooEntity, km: float = 30.0) -> bool:
     return 6371 * 2 * math.asin(math.sqrt(h)) < km
 
 
+NEARBY_KM = 80
+SPARE_CITIES = 2  # extra picks scored and searched in the same calls; mislocated ones are swapped out
+
+
 def unique_cities(destinations: list[QlooEntity], limit: int, diverse: bool = True,
                   max_per_country: int | None = 2) -> list[QlooEntity]:
     """Distinct cities in ranked order, spread across regions so a shortlist offers real choices.
 
     Near-duplicates (same name, or within 30 km in the same country) are always dropped. With
-    `diverse`, the first pass takes at most one city per state/region and `max_per_country` per
-    country; leftover slots are then filled in rank order, so diversity never shrinks the list.
+    `diverse`, the first pass takes at most one city per state/region, `max_per_country` per
+    country, and nothing within NEARBY_KM of a pick (San Juan and Fajardo share venues); leftover slots are then filled in rank order, so diversity never shrinks the list.
     """
     candidates = _distinct(destinations)
     if not diverse:
@@ -735,7 +962,8 @@ def unique_cities(destinations: list[QlooEntity], limit: int, diverse: bool = Tr
         geocode = (city.get("properties") or {}).get("geocode") or {}
         country = COUNTRY_EQUIVALENTS.get(geocode.get("country_code"), geocode.get("country_code"))
         region = (country, geocode.get("admin1_region"))
-        if (region[1] and region in regions) or (max_per_country and country and per_country[country] >= max_per_country):
+        if ((region[1] and region in regions) or (max_per_country and country and per_country[country] >= max_per_country)
+                or any(near(city, other, NEARBY_KM) for other in picked)):
             continue
         picked.append(city)
         regions.add(region)
@@ -777,12 +1005,12 @@ def location_label(name: str, geocode: dict[str, Any]) -> str:
     return label
 
 
-def build_city(city: QlooEntity, found: tuple[list[QlooEntity], bool, int | None],
+def build_city(city: QlooEntity, found: Found,
                per_taste: dict[str, dict[str, float]], entities: list[MatchedTaste] | None = None) -> CityResult:
     """Build one city card from destination affinity, per-taste attribution and local places."""
     geocode = (city.get("properties") or {}).get("geocode") or {}
     location = location_label(city["name"], geocode)
-    places, by_radius, radius_km = found
+    places, by_radius, radius_km, venue_filter = found
     neighborhoods, top_spots, vibe = summarize_places(places, city, by_radius)
     names = {e["id"]: e["name"] for e in entities or []}
     categories = {e["id"]: e["category"] for e in entities or []}
@@ -796,13 +1024,32 @@ def build_city(city: QlooEntity, found: tuple[list[QlooEntity], bool, int | None
         "neighborhoods": neighborhoods, "top_spots": top_spots, "vibe": vibe,
         "drivers": [{"taste": names.get(tid, tid), "id": tid, "category": categories.get(tid, ""), "affinity": round(score, 3)}
                     for tid, score in drivers if score > 0][:MAX_ENTITIES],
-        "why": "", "radius_km": radius_km,
+        "why": "", "radius_km": radius_km, "venue_filter": venue_filter,
         "coverage": {"places_returned": len(places), "places_relevant": len(relevant),
                      "neighborhoods": len(neighborhoods), "tastes_scored": sum(1 for _, s in drivers if s > 0),
                      "tastes_total": len(entities) if entities else len(per_taste)},
     }
     result["why"] = explain(result, [])
+    result["mislocated"] = mislocated(city, location, relevant)
     return result
+
+
+def mislocated(city: QlooEntity, label: str, relevant: list[QlooEntity]) -> bool:
+    """Qloo occasionally pins a destination far from the real town ("Doolin" at Pottstown, PA;
+    "Cambridge" in London). Then its geocode names another town *and* none of the venues found
+    around its coordinates has the town in its address. Real districts ("Shinjuku" near Tokyo,
+    "Venice" near Marina del Rey) always have some venues that do."""
+    addresses = [a for a in (address_text(p) for p in relevant) if a]
+    return " · near " in label and len(addresses) >= 5 and not any(mentions(a, city["name"]) for a in addresses)
+
+
+def located(built: list[CityResult], n_cities: int, trace: list[str]) -> list[CityResult]:
+    """Drop mislocated cities (the spare fills in) and trim to n_cities."""
+    for city in built:
+        if city.get("mislocated"):
+            trace.append(f"skipped {city['city']}: Qloo's coordinates for it point to {city['location'].split(' · near ')[-1]} "
+                         f"(no venue there lists {city['city']} in its address)")
+    return [c for c in built if not c.get("mislocated")][:n_cities]
 
 
 URBAN_RADIUS_KM = 15
@@ -818,24 +1065,44 @@ def point(city: QlooEntity) -> str | None:
     return None
 
 
-async def find_places(q: Qloo, city: QlooEntity, signals: Parameters) -> tuple[list[QlooEntity], bool, int | None]:
-    """Find taste-matched venues around a city.
+async def find_places(q: Qloo, city: QlooEntity, signals: Parameters, tags: list[LifestyleTag] | None = None) -> Found:
+    """Find taste-matched venues around a city: (places, by_radius, radius_km, lifestyle filter names).
 
     Uses the destination's own coordinates (filter.location + radius), because a bare name is
-    ambiguous ("Flores" resolves to a Buenos Aires barrio). Widens to 60 km for small towns with
-    thin data, and only falls back to a name query if coordinates are missing.
+    ambiguous ("Flores" resolves to a Buenos Aires barrio). Venues are first narrowed to the
+    lifestyle's place tags (cafés, hiking, coworking...); if that leaves too few, the filter is
+    dropped. Widens to 60 km for small towns with thin data. Falls back to a name query only if
+    coordinates are missing.
     """
     wkt = point(city)
+    lifestyle = _tag_filter(tags or [], "place_tags")
+    names = list(dict.fromkeys(t["name"] for t in tags or [] if t.get("place_tags")))
     if not wkt:
-        return await q.insights(filter__type="urn:entity:place", filter__location__query=city["name"],
-                                take=30, **signals), False, None
+        for narrow in ([lifestyle] if lifestyle else []) + [{}]:
+            places = await q.insights(filter__type="urn:entity:place", filter__location__query=city["name"],
+                                      take=30, **signals, **narrow)
+            if not narrow or len(local_relevant(places, city)) >= MIN_LOCAL_SPOTS:
+                return places, False, None, names if narrow else []
+    # Local beats lifestyle-matched: a 60 km radius around a small town can reach the next city's venues.
+    attempts = ([(URBAN_RADIUS_KM, lifestyle)] if lifestyle else []) + [(URBAN_RADIUS_KM, {}), (WIDE_RADIUS_KM, {})]
     places: list[QlooEntity] = []
-    for radius in (URBAN_RADIUS_KM, WIDE_RADIUS_KM):
+    for radius, narrow in attempts:
         places = await q.insights(filter__type="urn:entity:place", filter__location=wkt,
-                                  filter__location__radius=radius * 1000, take=30, **signals)
+                                  filter__location__radius=radius * 1000, take=30, **signals, **narrow)
         if len(local_relevant(places, city, True)) >= MIN_LOCAL_SPOTS:
-            return places, True, radius
-    return places, True, WIDE_RADIUS_KM
+            return places, True, radius, names if narrow else []
+    return places, True, WIDE_RADIUS_KM, []
+
+
+# Qloo destination genre names → phrases that read naturally after "Known for:".
+KNOWN_FOR = {"for the history": "history", "with kids": "families with kids", "great nightlife": "nightlife",
+             "great shopping": "shopping", "great architecture": "architecture", "urban destinations": "city life",
+             "scenic & picturesque": "scenery", "foodie destination": "food", "romantic getaways": "romantic getaways",
+             "snow and ski": "skiing", "outdoor activities": "the outdoors", "entertainment & performing arts": "performing arts"}
+
+
+def known_for(city_tags: list[str]) -> list[str]:
+    return [KNOWN_FOR.get(t.casefold(), t.casefold()) for t in city_tags]
 
 
 def explain(result: CityResult, tags: list[LifestyleTag]) -> str:
@@ -844,7 +1111,7 @@ def explain(result: CityResult, tags: list[LifestyleTag]) -> str:
     if result["drivers"]:
         parts.append("Strongest pull: " + ", ".join(f"{driver['taste']} ({pct(driver['affinity'])})" for driver in result["drivers"][:3]) + ".")
     if result["city_tags"]:
-        parts.append("Known for: " + ", ".join(result["city_tags"][:3]).lower() + ".")
+        parts.append("Known for: " + ", ".join(known_for(result["city_tags"][:3])) + ".")
     if result["neighborhoods"]:
         neighborhood = result["neighborhoods"][0]
         parts.append(f"Start in {neighborhood['name']}: spots like {', '.join(neighborhood['spots'][:2])} match your taste.")
