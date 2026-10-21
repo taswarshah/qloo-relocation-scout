@@ -26,7 +26,20 @@ COUNTRY_RE = re.compile(r"^[A-Z]{2}$")
 
 app = FastAPI(title="Relocation Scout", docs_url=None if PROD else "/docs",
               redoc_url=None, openapi_url=None if PROD else "/openapi.json")
-_scout_slots = asyncio.Semaphore(MAX_CONCURRENT)
+# Concurrent scout/chat runs, as {token: start time}. Not a semaphore: a Worker request torn down mid-run
+# never releases, and leaked permits made every later request wait. A stale entry expires instead.
+_slots: dict[object, float] = {}
+
+def _take_slot() -> object | None:
+    now = time.monotonic()
+    for token, started in list(_slots.items()):
+        if now - started > max(SCOUT_TIMEOUT, CHAT_TIMEOUT) + 10:
+            _slots.pop(token, None)
+    if len(_slots) >= MAX_CONCURRENT:
+        return None
+    token = object()
+    _slots[token] = now
+    return token
 _hits: dict[str, deque] = defaultdict(deque)
 
 Field80 = lambda: Field(default="", max_length=400)
@@ -104,9 +117,10 @@ async def _bad_input(request: Request, exc: RequestValidationError):
 async def api_scout(p: Profile, request: Request):
     if rate_limited(client_ip(request)):
         return JSONResponse({"error": "Too many requests. Try again in a minute."}, status_code=429, headers={"Retry-After": "60"})
-    if _scout_slots.locked():
+    slot = _take_slot()
+    if slot is None:
         return JSONResponse({"error": "Busy right now. Try again shortly."}, status_code=503, headers={"Retry-After": "10"})
-    async with _scout_slots:
+    try:
         try:
             result = await asyncio.wait_for(scout(p.model_dump()), timeout=SCOUT_TIMEOUT)
             if result.get("error") and (result.get("health") or {}).get("failed_calls"):
@@ -117,6 +131,8 @@ async def api_scout(p: Profile, request: Request):
         except Exception:
             log.exception("scout failed")  # httpx errors include URL only; key is in a header, never logged
             return JSONResponse({"error": "Something went wrong."}, status_code=502)
+    finally:
+        _slots.pop(slot, None)
 
 # Local/Docker: FastAPI serves the frontend. On Cloudflare Workers the same files are served as static assets.
 STATIC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static")
@@ -140,9 +156,10 @@ async def api_chat(body: ChatRequest, request: Request):
         return JSONResponse({"error": "The chat agent isn't enabled on this server. Use the form instead."}, status_code=501)
     if rate_limited(client_ip(request)):
         return JSONResponse({"error": "Too many requests. Try again in a minute."}, status_code=429, headers={"Retry-After": "60"})
-    if _scout_slots.locked():
+    slot = _take_slot()
+    if slot is None:
         return JSONResponse({"error": "Busy right now. Try again shortly."}, status_code=503, headers={"Retry-After": "10"})
-    async with _scout_slots:
+    try:
         try:
             profile = body.profile.model_dump(exclude={"compare"})
             result = await asyncio.wait_for(chat_agent.chat([m.model_dump() for m in body.messages], profile), timeout=CHAT_TIMEOUT)
@@ -152,6 +169,8 @@ async def api_chat(body: ChatRequest, request: Request):
         except Exception:
             log.exception("chat failed")
             return JSONResponse({"error": "The agent is unavailable right now. The form still works."}, status_code=502)
+    finally:
+        _slots.pop(slot, None)
 
 @app.get("/healthz")
 async def health(): return {"ok": True}

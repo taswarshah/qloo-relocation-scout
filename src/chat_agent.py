@@ -33,19 +33,30 @@ NUMBER = re.compile(r"(?<![\d.])\d{2,3}(?![\d.])")
 GROUNDING_NUDGE = ("Your answer contains numbers no Qloo tool returned ({numbers}). Do not guess: call the right tool "
                    "(blend_profiles for a partner, check_city for one city, scout_cities for a new profile) and answer "
                    "only from its result.")
+# Comparing places on topics Qloo has no data for ("Huatulco is more affordable than Oaxaca City", seen live).
+OFF_SCOPE_CLAIM = re.compile(
+    r"\b(cheaper|pricier|more (affordable|expensive)|less (affordable|expensive)|(lower|higher) (cost|prices?)|"
+    r"(rent|rents|prices?|housing) (is|are) (lower|higher|cheaper)|safer|less safe|more dangerous|"
+    r"(lower|higher) crime|warmer|colder|sunnier)\b", re.I)
+SCOPE_NUDGE = ("Qloo has no data on cost of living, rent, safety, visas, jobs or weather. Rewrite without comparing "
+               "places on those topics: say plainly that Qloo doesn't cover it and suggest a specialist source.")
+SCOPE_ANSWER = ("Qloo covers cultural taste, not cost of living, rent, safety, visas, jobs or weather, so I can't compare "
+                "cities on that. A specialist source such as Numbeo (costs) or official government sites (visas) can help.")
 AI_BINDING: Any = None  # Workers AI binding (env.AI), injected by the Worker entrypoint
 
 SYSTEM_PROMPT = """You are Relocation Scout, an agent that helps people decide where to live based on their cultural taste.
 Your only source of facts about places is the Qloo tools. Rules:
 - Call a tool before recommending or comparing anything. Never invent cities, neighborhoods, venues or scores.
 - Quote Qloo numbers as given (0-100 affinity) and name the tastes that drive them.
+- Describe each city only with its own known_for, vibe and spots. Never say "all" or "both" cities share a trait
+  unless every one of them lists it.
 - Keep the user's existing profile and change only what they ask. Profile fields are comma-separated names:
   music (artists), films, tv, books, food (restaurants/cafes), brands, lifestyle (keywords), country (2-letter ISO code or empty).
 - If a tool lists unmatched_tastes, tell the user Qloo didn't recognize them and suggest a more specific name.
 - When the user mentions a partner, friend or family member with different taste, use blend_profiles.
 - When the user asks about a specific city, use check_city; for "where in X" or "best area for coffee in X", use explore_city.
-- Qloo covers taste, not cost of living, visas, jobs, safety or weather. If asked, say so plainly; you may add a short,
-  clearly labeled general-knowledge note, but never present it as Qloo data.
+- Qloo covers taste, not cost of living, visas, jobs, safety or weather. If asked, say so plainly and suggest a
+  specialist source. Never compare or rank places on those topics, not even from general knowledge.
 - Reply in at most 120 words, warm and specific. The app shows full city cards, so summarize rather than list everything."""
 
 _PROFILE_PROPS = {
@@ -241,7 +252,7 @@ async def chat(history: list[dict[str, Any]], profile: dict[str, Any] | None) ->
     # Everything the reply may quote numbers from: the conversation, plus every tool result this turn.
     evidence = [t["content"] for t in turns]
     async with httpx.AsyncClient(timeout=httpx.Timeout(25.0, connect=5.0)) as client:
-        nudged = grounded_retry = False
+        nudged = grounded_retry = scope_retry = False
         for _ in range(MAX_STEPS):
             message = await _complete(client, messages)
             calls = message.get("tool_calls") or []
@@ -263,6 +274,15 @@ async def chat(history: list[dict[str, Any]], profile: dict[str, Any] | None) ->
                 grounded_retry = True
                 messages.append({"role": "assistant", "content": message.get("content") or ""})
                 messages.append({"role": "user", "content": GROUNDING_NUDGE.format(numbers=", ".join(missing))})
+                continue
+            if not calls and OFF_SCOPE_CLAIM.search(message.get("content") or ""):
+                # Qloo can't back a cost/safety/weather comparison: ask once for a plain answer, then give a fixed one.
+                if scope_retry:
+                    message = {"content": SCOPE_ANSWER}
+                    break
+                scope_retry = True
+                messages.append({"role": "assistant", "content": message.get("content") or ""})
+                messages.append({"role": "user", "content": SCOPE_NUDGE})
                 continue
             if not calls:
                 break

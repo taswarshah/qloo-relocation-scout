@@ -1,9 +1,11 @@
 """Cloudflare Python Worker entrypoint: serves the same FastAPI app (static files are Workers assets)."""
+import asyncio
 import json
 import os
 from urllib.parse import urlparse
 
-from workers import Response, WorkerEntrypoint
+from pyodide.ffi import create_proxy
+from workers import Response, WorkerEntrypoint, wait_until
 
 # Worker vars/secrets arrive on self.env, not os.environ; app/agent read os.environ at import time.
 ENV_KEYS = ("QLOO_API_KEY", "QLOO_BASE_URL", "QLOO_CONCURRENCY", "QLOO_CACHE_TTL_S", "QLOO_CACHE_MAX",
@@ -62,4 +64,12 @@ class Default(WorkerEntrypoint):
                             headers={"content-type": "application/json", "retry-after": "60",
                                      "x-content-type-options": "nosniff", "cache-control": "no-store"})
         import asgi
-        return await asgi.fetch(_load_app(self.env), request, self.env)
+        task = asyncio.ensure_future(asgi.fetch(_load_app(self.env), request, self.env))
+        if request.method == "POST":
+            # A client that disconnects mid-scout (refresh, closed tab) cancels the request's pending fetches and
+            # leaves the run suspended forever, holding its concurrency slot. waitUntil lets the run finish (and
+            # fill the cache for the retry). Same proxy pattern as the SDK's own websocket handler.
+            proxy = create_proxy(task)
+            task.add_done_callback(lambda _: proxy.destroy())
+            wait_until(proxy)
+        return await task

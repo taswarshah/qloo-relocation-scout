@@ -702,6 +702,32 @@ def test_pacer_spaces_requests_to_qloo_rate_limit():
     assert elapsed >= 0.19  # 5 requests at 20/s with no burst: the last waits ~4 x 50 ms
 
 
+def test_pacer_survives_a_waiter_that_never_resumes():
+    """Seen live: a Worker request torn down mid-sleep never released the pacer's lock, so every later
+    request hung until the 60 s timeout. An abandoned wait must not block the next caller."""
+    import asyncio, time
+    pacer = agent._Pacer(rate=20.0, burst=1)
+    async def run():
+        await pacer.wait()
+        stuck = pacer.wait(); stuck.send(None)  # start a wait, then drop it mid-sleep (no cleanup runs)
+        t = time.monotonic()
+        await asyncio.wait_for(pacer.wait(), timeout=1)
+        return time.monotonic() - t
+    assert asyncio.run(run()) < 0.5
+
+
+def test_leaked_scout_slots_expire(monkeypatch):
+    """A slot whose request vanished without releasing it frees itself after the timeout."""
+    monkeypatch.setattr(appmod, "_slots", {})
+    now = appmod.time.monotonic()
+    for i in range(appmod.MAX_CONCURRENT):
+        appmod._slots[object()] = now - appmod.CHAT_TIMEOUT - 30  # leaked long ago
+    assert appmod._take_slot() is not None
+    for i in range(appmod.MAX_CONCURRENT):
+        appmod._slots[object()] = now  # genuinely busy
+    assert appmod._take_slot() is None
+
+
 def test_429_waits_for_qloo_reset_header(monkeypatch):
     import asyncio, httpx
     seen = []
@@ -1014,6 +1040,31 @@ def test_chat_numbers_from_the_conversation_are_allowed(monkeypatch):
     history = [{"role": "user", "content": "Where?"}, {"role": "assistant", "content": "Glasgow scores 83."},
                {"role": "user", "content": "Was 83 from Qloo?"}]
     assert c.post("/api/chat", json={"messages": history}).json()["reply"] == "Yes, Glasgow's 83 came from Qloo."
+
+
+def test_chat_never_compares_places_on_data_qloo_lacks(monkeypatch):
+    """Seen live: "Huatulco is more affordable than Oaxaca City". Sent back once, then a fixed honest answer."""
+    sent = _script_llm(monkeypatch, [{"content": "Huatulco is more affordable than Oaxaca City."},
+                                     {"content": "Huatulco is cheaper, check Numbeo."}])
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "What about cost of living?"}]}).json()
+    assert "more affordable" not in body["reply"] and "cheaper" not in body["reply"]
+    assert "Qloo covers cultural taste" in body["reply"]
+    assert sent[1][-1]["role"] == "user" and "cost" in sent[1][-1]["content"]
+
+
+def test_chat_plain_scope_answer_is_kept(monkeypatch):
+    _script_llm(monkeypatch, [{"content": "Qloo doesn't cover cost of living; try a specialist site like Numbeo."}])
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "Is it expensive?"}]}).json()
+    assert body["reply"].startswith("Qloo doesn't cover cost of living")
+
+
+@pytest.mark.parametrize("text,hit", [
+    ("Lisbon is cheaper than Pittsburgh.", True), ("Rent is lower in Porto.", True),
+    ("Kyoto is safer than Osaka.", True), ("It's warmer in Huatulco.", True),
+    ("Qloo doesn't cover cost of living.", False), ("Pittsburgh scores 84 on your taste.", False),
+    ("An affordable cafe scene.", False)])
+def test_off_scope_claims(text, hit):
+    assert bool(chat_agent.OFF_SCOPE_CLAIM.search(text)) is hit
 
 
 def test_blend_with_the_users_own_profile_is_rejected(monkeypatch):

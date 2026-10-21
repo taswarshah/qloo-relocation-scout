@@ -53,7 +53,7 @@ Hosting runs on Cloudflare Workers; the chat agent uses Workers AI (`@cf/mistral
 **Why this model:** a live 5-turn test checked every number in each reply against the tool outputs. Mistral Small 3.1 had 0 ungrounded numbers and correct tool use; Llama 4 Scout wrote tool calls as text, and gpt-oss-120b invented 10 of 19 numbers. As a guard, any reply that writes a tool call as text is retried once and then refused.
 
 ## Performance
-Three parallel rounds of Qloo calls (resolve, then rank and attribute, then neighborhoods). Bounded concurrency (`QLOO_CONCURRENCY`, default 6), a pooled keep-alive HTTP client, a token-bucket pacer matched to the key's 5 req/s limit (`QLOO_RATE_PER_S`) with a wait-until-reset retry on 429, and a private in-memory TTL cache (`QLOO_CACHE_TTL_S`, `QLOO_CACHE_MAX`). Measured with a cold cache across the 10 eval personas: p50 6.2 s, max 7.6 s (see [eval/RESULTS.md](eval/RESULTS.md) for the latest run). Cached repeats take under 50 ms. Every response includes a `timings` object.
+Three parallel rounds of Qloo calls (resolve, then rank and attribute, then neighborhoods). Bounded concurrency (`QLOO_CONCURRENCY`, default 6), a pooled keep-alive HTTP client, a lock-free pacer matched to the key's 5 req/s limit (`QLOO_RATE_PER_S`) with a wait-until-reset retry on 429, runs that finish even if the client disconnects (Workers `waitUntil`), so an abandoned request can't block the next one, and a private in-memory TTL cache (`QLOO_CACHE_TTL_S`, `QLOO_CACHE_MAX`). Measured with a cold cache across the 10 eval personas: p50 6.2 s, max 7.6 s (see [eval/RESULTS.md](eval/RESULTS.md) for the latest run). Cached repeats take under 50 ms. Every response includes a `timings` object.
 
 ## Data quality
 Neighborhood names are cleaned of administrative prefixes. Venues whose address or geocode contradicts the city or country are dropped (US territories count as US). Destinations within 30 km of each other are merged. Amenity, numeric and COVID-era tags are filtered out of the vibe. Cities without neighborhood labels fall back to top taste-matched spots.
@@ -82,7 +82,7 @@ Screenshots of results and the comparison view contain Qloo response data, so th
 
 ## Notes
 - Qloo responses are cached in memory only. No Qloo data is stored in this repo, as the hackathon terms require.
-- Requests are rate-limited (semaphore plus 429 backoff).
+- Requests are rate-limited (edge limits, a self-expiring concurrency cap, and 429 backoff).
 - Third-party credits: Qloo Insights API, FastAPI, httpx; DM Sans and Manrope fonts (SIL Open Font License, self-hosted); Lucide icons (ISC); hero photo of Manarola from Unsplash (Unsplash License).
 
 ## Security

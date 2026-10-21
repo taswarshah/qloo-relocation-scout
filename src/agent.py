@@ -18,7 +18,7 @@ log = logging.getLogger("scout.qloo")
 load_dotenv()
 BASE = os.getenv("QLOO_BASE_URL", "https://hackathon.api.qloo.com")
 KEY = os.getenv("QLOO_API_KEY", "")
-SEM = asyncio.Semaphore(int(os.getenv("QLOO_CONCURRENCY", "6")))
+QLOO_CONCURRENCY = int(os.getenv("QLOO_CONCURRENCY", "6"))
 CACHE_TTL_S = float(os.getenv("QLOO_CACHE_TTL_S", "3600"))
 CACHE_MAX = int(os.getenv("QLOO_CACHE_MAX", "2000"))
 # Private, in-process (memory-only) cache shared across requests. Never written to disk or the repo,
@@ -32,31 +32,28 @@ QLOO_BURST = int(os.getenv("QLOO_BURST", "1"))
 
 
 class _Pacer:
-    """Token bucket shared by all requests in this process (one API key, one limit)."""
+    """Rate pacer shared by all requests in this process (one API key, one limit).
+
+    Lock-free on purpose: each caller books the next free slot synchronously, then sleeps until it.
+    A Worker request torn down mid-sleep never runs its cleanup, so a held lock (the old design) hung
+    every later request until the timeout. A booked slot simply passes.
+    """
 
     def __init__(self, rate: float, burst: int) -> None:
-        self.rate, self.burst = rate, burst
-        self.tokens = float(burst)
-        self.updated = time.monotonic()
-        self.lock: asyncio.Lock | None = None
+        self.interval = 1 / rate
+        self.burst = burst
+        self.next_at = time.monotonic() - (burst - 1) * self.interval  # first `burst` calls go at once
 
     async def wait(self) -> None:
-        if self.lock is None:
-            self.lock = asyncio.Lock()
-        async with self.lock:
-            now = time.monotonic()
-            self.tokens = min(self.burst, self.tokens + (now - self.updated) * self.rate)
-            self.updated = now
-            if self.tokens < 1:
-                await asyncio.sleep((1 - self.tokens) / self.rate)
-                self.updated = time.monotonic()
-                self.tokens = 1.0
-            self.tokens -= 1
+        now = time.monotonic()
+        at = max(now, self.next_at)
+        self.next_at = at + self.interval
+        if at > now:
+            await asyncio.sleep(at - now)
 
     def drain(self) -> None:
         """Qloo said we're over the limit (another isolate or user shares the key): start from empty."""
-        self.tokens = 0.0
-        self.updated = time.monotonic()
+        self.next_at = max(self.next_at, time.monotonic() + self.interval)
 
 
 _PACER = _Pacer(QLOO_RATE_PER_S, QLOO_BURST)
@@ -191,6 +188,8 @@ class Qloo:
 
     def __init__(self) -> None:
         self.c = _shared_client()
+        # Per request, not global: a permit leaked by a torn-down request must not block other requests.
+        self.sem = asyncio.Semaphore(QLOO_CONCURRENCY)
         self.calls = 0
         self.errors = 0
         self.cache_hits = 0
@@ -219,7 +218,7 @@ class Qloo:
         self.calls += 1
         stat = self.stats[path]
         stat["calls"] += 1
-        async with SEM:
+        async with self.sem:
             transient_retried = False
             attempt = 0
             while True:
