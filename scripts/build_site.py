@@ -23,6 +23,13 @@ csp = "".join(re.findall(r'"((?:[^"\\]|\\.)*)"', csp))
   Cross-Origin-Opener-Policy: same-origin
   Strict-Transport-Security: max-age=31536000; includeSubDomains
 
+# no-transform stops Cloudflare injecting its Web Analytics beacon, which the CSP would block (console errors).
+/
+  Cache-Control: public, max-age=0, must-revalidate, no-transform
+
+/index.html
+  Cache-Control: public, max-age=0, must-revalidate, no-transform
+
 /static/fonts/*
   Cache-Control: public, max-age=31536000, immutable
 
