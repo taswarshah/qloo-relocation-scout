@@ -126,6 +126,7 @@ class CityResult(TypedDict):
     why: str
     radius_km: int | None
     venue_filter: list[str]
+    venue_filter_missed: list[str]
     mislocated: bool
     coverage: dict[str, int]
 
@@ -357,6 +358,10 @@ def match_quality(query: str, name: str) -> float:
     whole = SequenceMatcher(None, " ".join(q), " ".join(n)).ratio()
     found = sum(1 for word in q if any(SequenceMatcher(None, word, other).ratio() >= 0.85 for other in n))
     coverage = found / len(q)
+    # A near-identical spelling counts on its own; otherwise every word must be found, so a shared surname
+    # alone ("Wes Anderson" vs "Joe Anderson", 0.83 whole-string) doesn't pass.
+    if len(q) > 1 and whole < 0.92:
+        whole = 0.0
     return max(whole, 0.9 * coverage if coverage == 1 else 0.6 * coverage)
 
 
@@ -655,11 +660,20 @@ async def resolve_book(q: Qloo, name: str) -> tuple[MatchedTaste | None, str]:
             f"search: '{name}' → {hit['name']} (book) → author {person['name']} (person)")
 
 
+CREATOR_WORKS = re.compile(r"^(.+?)(?:'s)?\s+(?:films|movies|shows|series)$", re.IGNORECASE)
+
+
 async def resolve_taste(q: Qloo, category: str, name: str) -> tuple[MatchedTaste | None, str]:
     """One free-text favorite → a matched taste (or None) and a trace line."""
     if category == "books":
         return await resolve_book(q, name)
-    entity = await q.search(name, CATEGORY_TYPES[category])
+    if category in ("films", "tv") and (by := CREATOR_WORKS.match(name)):
+        name = by.group(1)  # "Wes Anderson films" is the director, a person in Qloo
+        entity = await q.search(name, "urn:entity:person")
+    else:
+        entity = await q.search(name, CATEGORY_TYPES[category])
+        if not entity and category in ("films", "tv"):
+            entity = await q.search(name, "urn:entity:person")  # a director or actor ("Wes Anderson")
     if not entity:
         return None, f"search: '{name}' → no match"
     label = display_name(entity["name"])
@@ -681,17 +695,29 @@ async def resolve_lifestyle(q: Qloo, word: str) -> tuple[LifestyleTag | None, st
     return tag, f"tags: '{word}' → filter " + " · ".join(parts)
 
 
-DISH_TAG_KINDS = ("urn:tag:specialty_dish:place:", "urn:tag:cuisine:qloo:")
+FOOD_TAG_KINDS = ("urn:tag:specialty_dish:place:", "urn:tag:cuisine:qloo:", "urn:tag:genre:place:restaurant:",
+                  "urn:tag:category:place:", "urn:tag:offerings:place:")
 
 
 async def resolve_dish(q: Qloo, name: str) -> LifestyleTag | None:
-    """A food favorite that is a dish or cuisine ("biryani", "tacos") rather than a restaurant. Searching places
-    for it matches a lookalike restaurant ("Biryani Zone"), so it becomes a venue filter on Qloo's dish tags."""
-    dishes = [t for t in await q.tags(name) if (t.get("id") or "").startswith(DISH_TAG_KINDS)
-              and singular(t.get("name") or "") == singular(name)]
-    if not dishes:
+    """A food favorite that names a dish, cuisine or kind of place ("biryani", "steakhouses", "vegan cafes") rather
+    than a restaurant. Searching places for it matches a lookalike ("Biryani Zone", "Vegan Cafe Shinei Shizenha"),
+    so it becomes a venue filter on Qloo's tags. Only exact tag names count: "Nobu" or "Blue Bottle Coffee" have
+    no such tag and are still searched as restaurants."""
+    words = [singular(w) for w in re.findall(r"\w+", normalize(name)) if w not in STOPWORDS]
+    if not words:
         return None
-    return {"id": dishes[0]["id"], "word": name, "name": dishes[0]["name"], "place_tags": [t["id"] for t in dishes[:2]]}
+    candidates = [t for t in await q.tags(" ".join(words)) if (t.get("id") or "").startswith(FOOD_TAG_KINDS)]
+    candidates.sort(key=lambda t: next(i for i, kind in enumerate(FOOD_TAG_KINDS) if t["id"].startswith(kind)))
+    slug = lambda t: t["id"].rsplit(":", 1)[-1]
+    picked = [t for t in candidates if slug(t) == "_".join(words)][:2]
+    if not picked and len(words) > 1:  # "vegan cafes": one tag per word
+        per_word = [next((t for t in candidates if slug(t) == w), None) for w in words]
+        picked = [t for t in per_word if t] if all(per_word) else []
+    if not picked:
+        return None
+    return {"id": picked[0]["id"], "word": name, "name": picked[0]["name"] if len(picked) == 1 or len(words) == 1 else name.title(),
+            "place_tags": [t["id"] for t in picked]}
 
 
 async def resolve_food(q: Qloo, name: str) -> tuple[MatchedTaste | LifestyleTag | None, str]:
@@ -801,6 +827,7 @@ async def _scout(q: Qloo, profile: dict[str, str], n_cities: int) -> ScoutResult
         cand_result = next(b for b in built if b["entity_id"] == cand_entity["entity_id"])
     else:
         cand_result = built.pop() if cand_entity else None
+    note_missed_filters(built, tags)
     results = located(built, n_cities, trace)
     t3 = time.perf_counter()
     narrative = await llm_summary(profile, results)
@@ -889,12 +916,16 @@ async def blend(profile_a: dict[str, str], profile_b: dict[str, str], n_cities: 
     per_person = {"person-a": score_a, "person-b": score_b} if hits_a and hits_b else {}
     people: list[MatchedTaste] = [{"id": "person-a", "name": labels[0], "category": "person"},
                                   {"id": "person-b", "name": labels[1], "category": "person"}]
-    cities = located([build_city(c, f, per_person, people) for c, f in zip(shown, found)], n_cities, trace)
+    cities = located(note_missed_filters([build_city(c, f, per_person, people) for c, f in zip(shown, found)], both_tags),
+                     n_cities, trace)
     total = round((time.perf_counter() - t0) * 1000)
     trace.append(f"done in {total} ms · {q.calls} Qloo calls · {q.cache_hits} cache hits")
     out: ScoutResult = {"matched": ea + eb, "lifestyle_tags": ta + tb, "cities": cities, "narrative": None, "trace": trace,
                         "timings": {"total_ms": total, "qloo_calls": q.calls, "cache_hits": q.cache_hits, "qloo_failed": q.failed},
-                        "health": q.health(), "blend": {"a": labels[0], "b": labels[1]}}
+                        "health": q.health(), "blend": {"a": labels[0], "b": labels[1]},
+                        "people": {labels[0]: [e["name"] for e in ea] + [t["word"] for t in ta],
+                                   labels[1]: [e["name"] for e in eb] + [t["word"] for t in tb]},
+                        "unmatched": unmatched(trace)}
     if q.failed:
         out["warning"] = "Some Qloo requests failed or timed out, so these results may be incomplete. Try again in a moment."
     return out
@@ -1060,6 +1091,15 @@ def district_title(name: str, geocode: dict[str, Any]) -> str | None:
     if normalize(geocode.get("admin1_region") or "") == normalize(town) and not set(a.split()) & set(b.split()):
         return f"{town} ({name})"
     return None
+
+
+def note_missed_filters(cities: list[CityResult], tags: list[LifestyleTag]) -> list[CityResult]:
+    """Say when a requested venue filter ("jollof", "vinyl") found no spots in a city, instead of falling
+    back to unfiltered spots silently."""
+    wanted = [t["name"] for t in tags if t.get("place_tags")]
+    for city in cities:
+        city["venue_filter_missed"] = [] if city["venue_filter"] else wanted
+    return cities
 
 
 def build_city(city: QlooEntity, found: Found,

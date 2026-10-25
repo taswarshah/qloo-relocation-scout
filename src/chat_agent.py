@@ -19,7 +19,7 @@ import agent
 log = logging.getLogger("scout.chat")
 
 PROFILE_FIELDS = ("music", "films", "tv", "books", "food", "brands", "lifestyle", "country")
-MAX_STEPS = 6
+MAX_STEPS = 8
 MAX_HISTORY = 8  # keeps every LLM call small (cost)
 MAX_MESSAGE_CHARS = 600
 # Chosen by a live 5-turn grounding test (every number in each reply checked against tool output):
@@ -48,10 +48,12 @@ CITY_QUESTION = re.compile(r"(?i:\b(?:why not|what about|how about|compared? (?:
 NOT_CITY = {"I", "My", "Me", "We", "Us", "The", "It", "That", "This", "You", "Your", "Our", "Them", "Her", "His", "Him"}
 CITY_NUDGE = ("The user asked about {cities}. Call check_city once for each of them (one city per call) and answer "
               "only from the results.")
+NO_PROFILE = ("The user's tastes aren't set yet. Call scout_cities first with every taste named in their message, even if "
+              "some seem odd or contradictory (Qloo keeps what it can match), then call this tool again.")
 PLACE = r"[A-ZÀ-Þ][\w'.-]*(?:\s+[A-ZÀ-Þ][\w'.-]*){0,2}"
 CITY_PAIR = re.compile(rf"({PLACE})\s+(?i:or|vs\.?|versus)\s+({PLACE})")
 CITY_LIST = re.compile(r"(?i:\b(?:compare|between)\b)[:\s]+([^?.!]+)")
-MAX_CHECKED_CITIES = 4
+MAX_CHECKED_CITIES = 5
 MAX_CALLS_PER_STEP = MAX_CHECKED_CITIES  # "compare these four cities" fits in one step
 # A question about cost, safety etc.: the reply may give taste scores, but must say what Qloo doesn't cover.
 OFF_SCOPE_QUESTION = re.compile(r"(?i:\b(?:cheap\w*|cost\w*|expensive|afford\w*|rent|prices?|safe\w*|crime|dangerous|"
@@ -156,7 +158,8 @@ def _brief_city(city: dict[str, Any]) -> dict[str, Any]:
             "drivers": [f"{d['taste']} {round(d['affinity'] * 100)}" for d in city["drivers"][:4]],
             "known_for": city["city_tags"][:3],
             "neighborhoods": [{"name": n["name"], "spots": n["spots"][:3]} for n in city["neighborhoods"][:3]],
-            "top_spots": city["top_spots"][:4], "vibe": city["vibe"][:4]}
+            "top_spots": city["top_spots"][:4], "vibe": city["vibe"][:4],
+            **({"no_spots_found_for": city["venue_filter_missed"]} if city.get("venue_filter_missed") else {})}
 
 
 def _brief_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -177,6 +180,33 @@ def _brief_result(result: dict[str, Any]) -> dict[str, Any]:
     return brief
 
 
+def blend_reply(result: dict[str, Any]) -> str:
+    """The couple-mode answer, written from Qloo fields only. The model mixed up whose tastes were whose
+    ("you both love Radiohead") and added places Qloo never returned, so this reply is not left to it."""
+    a, b = result["blend"]["a"], result["blend"]["b"]
+    lines = ["Cities that suit you both, ranked by the lower of your two Qloo taste scores so neither of you is settling:"]
+    for city in result.get("cities", []):
+        scores = {d["taste"]: round(d["affinity"] * 100) for d in city["drivers"]}
+        parts = [f"**{city['location']}**: {a} {scores.get(a, '?')} · {b} {scores.get(b, '?')}."]
+        if city["city_tags"]:
+            parts.append(f"Known for {', '.join(agent.known_for(city['city_tags'][:3]))}.")
+        if city["neighborhoods"]:
+            hood = city["neighborhoods"][0]
+            parts.append(f"Start in {hood['name']} ({', '.join(hood['spots'][:2])}).")
+        elif city["top_spots"]:
+            parts.append(f"Spots to try: {', '.join(city['top_spots'][:2])}.")
+        if city["vibe"]:
+            parts.append(f"Vibe: {', '.join(v.lower() for v in city['vibe'][:3])}.")
+        lines.append("- " + " ".join(parts))
+    people = result.get("people") or {}
+    if people:
+        lines.append(f"Matched in Qloo for {a}: {', '.join(people.get(a, [])) or 'nothing'}. "
+                     f"For {b}: {', '.join(people.get(b, [])) or 'nothing'}.")
+    if result.get("unmatched"):
+        lines.append(f"Qloo didn't recognize: {', '.join(result['unmatched'])}. Try a more specific name.")
+    return "\n".join(lines)
+
+
 class Session:
     """One chat turn's state: the current profile, the latest renderable result and the step log."""
 
@@ -185,6 +215,7 @@ class Session:
         self.result: dict[str, Any] | None = None
         self.steps: list[str] = []
         self.parts = parts  # (user's words, other person's words) when the message describes both
+        self.final: str | None = None  # a reply built from tool data, used instead of the model's text
 
     def misplaced(self, profile: dict[str, str], own: bool) -> list[str]:
         """Tastes given to the wrong person: named only in the other person's part of the message."""
@@ -206,8 +237,8 @@ class Session:
             self.steps.append("scout_cities(" + ", ".join(f"{k}={v}" for k, v in self.profile.items()) + ")")
             self.result = dict(await agent.scout(self.profile))
             return _brief_result(self.result)
-        if not self.profile:
-            return {"error": "No taste profile yet. Ask the user for a few favorites, then call scout_cities."}
+        if not any(v for k, v in self.profile.items() if k != "country"):
+            return {"error": NO_PROFILE}
         if name == "check_city":
             city = str(args.get("city") or "")[:60].strip()
             self.steps.append(f"check_city({city})")
@@ -227,9 +258,6 @@ class Session:
             wrong = self.misplaced(other, own=False)
             if wrong:
                 return {"error": f"{', '.join(wrong)}: these are the user's own tastes. Pass only the partner's tastes."}
-            if not any(v for k, v in self.profile.items() if k != "country"):
-                return {"error": "The user's own tastes aren't set yet. Call scout_cities with the user's tastes first, "
-                                 "then blend_profiles with the other person's tastes."}
             if not tastes or tastes == {k: v for k, v in self.profile.items() if k != "country"}:
                 return {"error": "Pass the other person's own tastes (e.g. music='Bad Bunny, Daft Punk', lifestyle='beaches'), "
                                  "not the user's profile."}
@@ -238,6 +266,8 @@ class Session:
                 label = "Partner"  # models sometimes pass "you and your partner"; the user is already "You"
             self.steps.append(f"blend_profiles(You + {label}: " + ", ".join(f"{k}={v}" for k, v in tastes.items()) + ")")
             self.result = dict(await agent.blend(self.profile, other, labels=("You", label)))
+            if not self.result.get("error"):
+                self.final = blend_reply(self.result)
             return _brief_result(self.result)
         return {"error": f"Unknown tool {name}"}
 
@@ -297,7 +327,8 @@ def split_partner(text: str) -> tuple[str, str] | None:
     match = PARTNER.search(text)
     if not match:
         return None
-    end = re.search(r"[.?!]", text[match.end():])
+    end = re.search(r"[.?!;]|(?:,|\b(?:and|but|while|whereas)\b)?\s*\bI(?:'m| am)?\s+(?:love|like|into|enjoy|prefer|adore)",
+                    text[match.end():])
     stop = match.end() + end.start() if end else len(text)
     return text[:match.start()] + text[stop:], text[match.start():stop]
 
@@ -394,8 +425,19 @@ async def chat(history: list[dict[str, Any]], profile: dict[str, Any] | None) ->
                 # Every city the user names gets Qloo's score, not a description from the model's memory.
                 city_nudged = True
                 messages.append({"role": "assistant", "content": message.get("content") or ""})
-                messages.append({"role": "user", "content": CITY_NUDGE.format(cities=", ".join(unchecked))})
+                nudge = CITY_NUDGE.format(cities=", ".join(unchecked))
+                if not any(v for k, v in session.profile.items() if k != "country"):
+                    nudge = "First call scout_cities with every taste the user named, even if some seem contradictory. " + nudge
+                messages.append({"role": "user", "content": nudge})
                 continue
+            has_profile = any(v for k, v in session.profile.items() if k != "country")
+            if not calls and unchecked and city_nudged and has_profile and not partner:
+                # Nudged once and still skipped some: look them up here rather than let the model describe them
+                # from memory (seen live: "Berlin ... David Hasselhoff Museum"), then let it answer from the results.
+                calls = [{"id": f"auto{i}", "type": "function",
+                          "function": {"name": "check_city", "arguments": json.dumps({"city": city})}}
+                         for i, city in enumerate(unchecked)]
+                message = {"content": ""}
             if not calls and foreign and not language_nudged and non_latin_share(message.get("content") or "") < 0.3:
                 language_nudged = True
                 messages.append({"role": "assistant", "content": message.get("content") or ""})
@@ -420,7 +462,7 @@ async def chat(history: list[dict[str, Any]], profile: dict[str, Any] | None) ->
                                  "content": json.dumps({"error": "Too many tool calls in one step."})})
         else:
             message = {"content": "I ran out of steps for this question. Try asking one thing at a time."}
-    reply = (message.get("content") or "").strip() or "Here's what Qloo found."
+    reply = session.final or (message.get("content") or "").strip() or "Here's what Qloo found."
     if OFF_SCOPE_QUESTION.search(turns[-1]["content"]) and not re.search(r"(?i)\b(?:doesn't|does not|don't|do not|can't|cannot)\b.{0,40}\b(?:cover|compare|help|data)", reply) and not foreign:
         reply += "\n\n" + SCOPE_NOTE
     return {"reply": reply,

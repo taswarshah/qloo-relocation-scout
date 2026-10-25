@@ -633,7 +633,7 @@ def test_chat_rejects_injected_tool_messages_and_bad_args(monkeypatch):
 def test_chat_without_profile_asks_for_tastes(monkeypatch):
     sent = _script_llm(monkeypatch, [_call("check_city", {"city": "Lisbon"}), {"content": "Tell me what you love first."}])
     body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "is Lisbon good?"}]}).json()
-    assert body["result"] is None and "No taste profile yet" in sent[1][-1]["content"]
+    assert body["result"] is None and "tastes aren't set yet" in sent[1][-1]["content"]
 
 
 def test_chat_step_limit(monkeypatch):
@@ -928,6 +928,24 @@ def test_a_dish_in_food_becomes_a_venue_filter_not_a_lookalike_restaurant(monkey
     assert not any(p == "/search" and q.get("query") == "biryani" for p, q in seen)
 
 
+@pytest.mark.parametrize(("item", "tags", "expected"), [
+    ("vegan cafes", ["genre:place:restaurant:cafe", "category:place:cafe", "offerings:place:vegan_options",
+                     "genre:place:restaurant:vegan"], ["genre:place:restaurant:vegan", "genre:place:restaurant:cafe"]),
+    ("steakhouses", ["nearby_attraction:qloo:steakhouse", "cuisine:qloo:steakhouse", "category:place:steak_house"],
+     ["cuisine:qloo:steakhouse"]),
+    ("Blue Bottle Coffee", ["nearby_attraction:qloo:blue_bottle_coffee", "specialty_dish:place:blue_bottle_coffee_filter"], None),
+    ("Nobu", ["nearby_attraction:qloo:nobu"], None)])
+def test_generic_food_words_become_filters(monkeypatch, item, tags, expected):
+    async def get(self, path, params):
+        return {"results": {"tags": [{"id": "urn:tag:" + x, "name": x.rsplit(":", 1)[-1].title()} for x in tags]}}
+    monkeypatch.setattr(agent.Qloo, "get", get)
+    import asyncio
+    async def run():
+        return await agent.resolve_dish(agent.Qloo(), item)
+    found = asyncio.run(run())
+    assert (found and [x.removeprefix("urn:tag:") for x in found["place_tags"]]) == (expected or None)
+
+
 def test_narrow_lifestyle_filter_falls_back_to_full_ranking(monkeypatch):
     calls = []
     async def fake_insights(self, **params):
@@ -1142,7 +1160,7 @@ def test_chat_partner_tastes_force_the_blend_tool(monkeypatch):
                                      {"content": "Here are places for both of you."}])
     msg = "I love Radiohead. My partner loves Bad Bunny and tacos. Where should we both live?"
     body = c.post("/api/chat", json={"messages": [{"role": "user", "content": msg}]}).json()
-    assert body["steps"][-1].startswith("blend_profiles(") and body["reply"] == "Here are places for both of you."
+    assert body["steps"][-1].startswith("blend_profiles(") and body["reply"].startswith("Cities that suit you both")
     assert "blend_profiles" in sent[1][-1]["content"]
 
 
@@ -1160,10 +1178,50 @@ def test_chat_swapped_partner_tastes_are_sent_back(monkeypatch):
     assert body["profile"] == {"music": "Radiohead", "films": "Lost in Translation"}
 
 
+def test_blend_reply_uses_only_qloo_fields():
+    result = {"blend": {"a": "You", "b": "Partner"}, "people": {"You": ["Radiohead"], "Partner": ["Bad Bunny", "tacos"]},
+              "unmatched": ["zzq"], "cities": [{"location": "Nazca, Ica PE", "city_tags": ["For the History"],
+              "drivers": [{"taste": "You", "affinity": 0.811}, {"taste": "Partner", "affinity": 0.809}],
+              "neighborhoods": [{"name": "San Carlos", "spots": ["La Kasa Rustika", "La Estación", "X"]}],
+              "top_spots": [], "vibe": ["Welcoming", "Lively", "Walkable", "Relaxing"]}]}
+    reply = chat_agent.blend_reply(result)
+    assert "**Nazca, Ica PE**: You 81 · Partner 81. Known for history. Start in San Carlos (La Kasa Rustika, La Estación)." in reply
+    assert "Matched in Qloo for You: Radiohead. For Partner: Bad Bunny, tacos." in reply and "zzq" in reply
+    assert "both love" not in reply and "Relaxing" not in reply.title().split("Vibe")[0]
+
+
+@pytest.mark.parametrize(("query", "name", "ok"), [("Wes Anderson", "Joe Anderson", False), ("Wes Anderson", "Wes Anderson", True),
+                                                   ("Lost in Translaton", "Lost in Translation", True), ("Radiohed", "Radiohead", True)])
+def test_shared_surname_is_not_a_match(query, name, ok):
+    assert (agent.match_quality(query, name) >= agent.MIN_MATCH) is ok
+
+
+def test_director_films_search_the_person(monkeypatch):
+    seen = []
+    async def get(self, path, params):
+        seen.append(dict(params))
+        return await fake_get(self, path, params)
+    monkeypatch.setattr(agent.Qloo, "get", get)
+    body = c.post("/api/scout", json={"films": "Wes Anderson films"}).json()
+    assert body["matched"][0]["name"] == "Wes Anderson"
+    assert any(p.get("query") == "Wes Anderson" and p.get("types") == "urn:entity:person" for p in seen)
+
+
+def test_missed_venue_filter_is_reported():
+    cities = [{"venue_filter": ["Cafe"]}, {"venue_filter": []}]
+    tags = [{"name": "Jollof", "place_tags": ["urn:tag:specialty_dish:place:jollof"]}, {"name": "Beaches", "place_tags": []}]
+    out = agent.note_missed_filters(cities, tags)
+    assert [c["venue_filter_missed"] for c in out] == [[], ["Jollof"]]
+
+
 def test_split_partner_message():
     user, other = chat_agent.split_partner("I love Radiohead. My partner loves Bad Bunny and tacos. Where should we live?")
     assert "Radiohead" in user and "Bad Bunny" in other and "Radiohead" not in other and "Bad Bunny" not in user
     assert chat_agent.split_partner("I love Radiohead") is None
+    user, other = chat_agent.split_partner("My partner loves Metallica and steakhouses, I love Bjork and vegan cafes. Where?")
+    assert "Bjork" in user and "vegan cafes" in user and "Metallica" in other and "Bjork" not in other
+    user, other = chat_agent.split_partner("My wife likes Adele and I'm into Drake")
+    assert "Drake" in user and "Adele" in other and "Drake" not in other
 
 
 def test_blend_before_the_users_own_tastes_asks_for_them(monkeypatch):
@@ -1207,6 +1265,42 @@ def test_chat_replies_in_the_users_script(monkeypatch):
     sent = _script_llm(monkeypatch, [{"content": "Qloo doesn't cover that."}, {"content": "کلو اس کا احاطہ نہیں کرتا۔"}])
     body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "کیا یہ شہر سستا ہے؟"}]}).json()
     assert body["reply"] == "کلو اس کا احاطہ نہیں کرتا۔" and "language" in sent[1][-1]["content"]
+
+
+def test_cities_without_a_profile_scout_the_named_tastes_first(monkeypatch):
+    """Seen in review: "I love Taylor Swift ... hate music. Compare Paris, Berlin..." got "I can't compare" and no lookups."""
+    sent = _script_llm(monkeypatch, [{"content": "I can't compare cities without knowing your tastes."},
+                                     _call("check_city", {"city": "Paris"}),
+                                     _call("scout_cities", {"music": "Taylor Swift, Mozart"}, id="c2"),
+                                     _call("check_city", {"city": "Paris"}, id="c3"),
+                                     {"content": "Paris scores 50."},
+                                     {"content": "Paris scores 50, Berlin 50."}])
+    msg = "I love Taylor Swift and death metal and Mozart, hate music. Compare Paris and Berlin"
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": msg}]}).json()
+    assert sent[1][-1]["content"].startswith("First call scout_cities")
+    assert "aren't set yet" in sent[2][-1]["content"]  # check_city before any tastes is refused with instructions
+    assert body["steps"] == ["scout_cities(music=Taylor Swift, Mozart)", "check_city(Paris)", "check_city(Berlin)"]
+
+
+def test_cities_the_model_keeps_skipping_are_checked_by_code(monkeypatch):
+    _script_llm(monkeypatch, [{"content": "Berlin has the David Hasselhoff Museum."},
+                                     _call("check_city", {"city": "Paris"}),
+                                     {"content": "Berlin is lovely too."},
+                                     {"content": "Paris scores 50, Berlin scores 50."}])
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "Compare Paris and Berlin"}],
+                                     "profile": {"music": "Radiohead"}}).json()
+    assert body["steps"] == ["check_city(Paris)", "check_city(Berlin)"]
+    assert body["reply"] == "Paris scores 50, Berlin scores 50."
+
+
+def test_films_fall_back_to_a_person(monkeypatch):
+    async def get(self, path, params):
+        if path == "/search" and params["types"] == "urn:entity:movie":
+            return {"results": [{"entity_id": "m1", "name": "Some Unrelated Movie"}]}
+        return await fake_get(self, path, params)
+    monkeypatch.setattr(agent.Qloo, "get", get)
+    body = c.post("/api/scout", json={"films": "Wes Anderson"}).json()
+    assert body["matched"][0]["name"] == "Wes Anderson"
 
 
 def test_chat_declines_off_topic_code(monkeypatch):

@@ -66,6 +66,7 @@ function bar(score, label) {
 function localSection(city) {
   const section = element("section", null, "local-section");
   if (city.venue_filter?.length) section.append(element("p", `Spots picked for: ${city.venue_filter.join(" · ")}`, "venue-filter"));
+  else if (city.venue_filter_missed?.length) section.append(element("p", `No spots tagged ${city.venue_filter_missed.join(" · ")} found here, so these are your top taste matches.`, "venue-filter"));
   if (city.neighborhoods?.length) {
     section.append(element("h4", "Neighborhoods to explore"));
     const list = element("ul", null, "neighborhood-list");
