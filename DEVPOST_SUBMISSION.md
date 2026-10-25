@@ -84,3 +84,7 @@ Cost-of-living and visa overlays, side-by-side neighborhood comparison, saved sh
 
 ## Built with
 python, fastapi, httpx, asyncio, qloo-insights-api, llm-tool-calling, cloudflare-workers, html5, css3, javascript, github-actions
+
+## Demo video
+
+https://youtu.be/MciU2tP4TFk

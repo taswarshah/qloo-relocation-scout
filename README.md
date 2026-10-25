@@ -8,6 +8,12 @@ Built for the [Qloo Agentic Hackathon](https://qloo.devpost.com/).
 
 **Repo:** https://github.com/taswarshah/qloo-relocation-scout · **License:** MIT
 
+## Demo video
+
+[![Watch the Relocation Scout demo](https://img.youtube.com/vi/MciU2tP4TFk/hqdefault.jpg)](https://youtu.be/MciU2tP4TFk)
+
+Watch the 90-second demo on [YouTube](https://youtu.be/MciU2tP4TFk).
+
 ## Contents
 [Screenshots](#screenshots) · [Live examples](#live-examples) · [Features](#features) · [How it works](#how-it-works) · [Run locally](#run-locally) · [Docker](#run-with-docker) · [Deploy](#deploy-to-cloudflare-workers) · [Tests](#tests-and-evaluation) · [Usage](#usage) · [API](#api) · [Troubleshooting](#troubleshooting) · [Limitations](#limitations)
 
