@@ -637,7 +637,7 @@ def test_chat_without_profile_asks_for_tastes(monkeypatch):
 
 
 def test_chat_step_limit(monkeypatch):
-    _script_llm(monkeypatch, [_call("check_city", {"city": "A"}, id=str(i)) for i in range(chat_agent.MAX_STEPS)])
+    _script_llm(monkeypatch, [_call("explore_city", {"city": "A"}, id=str(i)) for i in range(chat_agent.MAX_STEPS)])
     body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "loop"}], "profile": {"music": "X"}}).json()
     assert "ran out of steps" in body["reply"]
 
@@ -971,6 +971,22 @@ def test_a_genre_word_in_music_filters_venues_not_a_lookalike_artist(monkeypatch
     assert body["lifestyle_tags"][0]["word"] == "jazz" and body["lifestyle_tags"][0]["place_tags"] == ["urn:tag:category:place:jazz_club"]
 
 
+@pytest.mark.parametrize(("item", "artist", "matched"), [("death metal", "Death Metal Disco Scene", False),
+                                                       ("jay z", "JAY-Z", True), ("beyonce", "Beyoncé", True),
+                                                       ("Death Metal", "Death Metal Disco Scene", True)])
+def test_lowercase_genre_phrases_are_not_lookalike_artists(monkeypatch, item, artist, matched):
+    async def get(self, path, params):
+        if path == "/search":
+            return {"results": [{"entity_id": "a1", "name": artist}]}
+        return {"results": {"tags": []}}
+    monkeypatch.setattr(agent.Qloo, "get", get)
+    import asyncio
+    async def run():
+        return await agent.resolve_music(agent.Qloo(), item)
+    found, _ = asyncio.run(run())
+    assert bool(found) is matched
+
+
 def test_narrow_lifestyle_filter_falls_back_to_full_ranking(monkeypatch):
     calls = []
     async def fake_insights(self, **params):
@@ -1167,7 +1183,7 @@ def test_chat_named_city_is_always_checked(monkeypatch):
                                      _call("check_city", {"city": "Lisbon"}, id="c2"),
                                      {"content": "Here is how Lisbon compares."}])
     body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "I love Radiohead. Why not Lisbon?"}]}).json()
-    assert body["steps"][-1] == "check_city(Lisbon)" and body["reply"] == "Here is how Lisbon compares."
+    assert body["steps"][-1] == "check_city(Lisbon)" and body["reply"].startswith("Scored on your tastes in Qloo")
     assert "check_city" in sent[2][-1]["content"] and "Lisbon" in sent[2][-1]["content"]
 
 
@@ -1178,7 +1194,7 @@ def test_chat_city_nudge_is_sent_only_once(monkeypatch):
                                      "profile": {"music": "Radiohead"}}).json()
     # One nudge; when the model still skips the city, the code looks it up and the model answers from that.
     assert sum("Call check_city" in m["content"] for m in sent[-1] if m["role"] == "user") == 1
-    assert body["steps"] == ["check_city(Lisbon)"] and body["reply"] == "Lisbon scores 50."
+    assert body["steps"] == ["check_city(Lisbon)"] and body["reply"].startswith("Scored on your tastes in Qloo")
 
 
 def test_chat_partner_tastes_force_the_blend_tool(monkeypatch):
@@ -1243,6 +1259,68 @@ def test_missed_venue_filter_is_reported():
     assert [c["venue_filter_missed"] for c in out] == [[], ["Jollof"]]
 
 
+def test_zero_affinity_cities_are_never_shown(monkeypatch):
+    """Seen in review: an invalid signal plus a genre filter gave Qloo's default list (Paris, New York...) at 0/100."""
+    async def get(self, path, params):
+        if path == "/search":
+            return {"results": [{"entity_id": "id-" + params["query"], "name": params["query"]}]}
+        if params.get("filter.type") == "urn:entity:destination":
+            return {"results": {"entities": [{**FAKE_CITY, "name": "Paris", "query": {"affinity": 0}}]}}
+        return await fake_get(self, path, params)
+    monkeypatch.setattr(agent.Qloo, "get", get)
+    body = c.post("/api/scout", json={"films": "Wes Anderson", "compare": "Kyoto"}).json()
+    assert "error" in body and not body.get("cities")
+
+
+def test_qloo_400_is_not_reported_as_an_outage(monkeypatch):
+    import httpx
+    def handler(request):
+        if request.url.path == "/search":
+            return httpx.Response(200, json={"results": [{"entity_id": "w1", "name": "Wes Anderson"}]})
+        return httpx.Response(400, json={"errors": [{"message": "All of the provided signal.interests.entities were invalid."}]})
+    _real_qloo(monkeypatch, handler)
+    body = c.post("/api/scout", json={"films": "Wes Anderson"}).json()
+    assert body["error"].startswith("Qloo can't rank cities by Wes Anderson") and "not responding" not in body["error"]
+
+
+def test_city_reply_uses_only_check_results():
+    lisbon = {"location": "Lisbon, Lisbon PT", "city": "Lisbon", "affinity": 0.76, "city_tags": ["Beaches"],
+              "neighborhoods": [{"name": "Alfama", "spots": ["Fado House", "Miradouro", "X"]}], "vibe": ["Historic", "Scenic"]}
+    checks = [{"asked": "Lisbon", "city": lisbon, "top_pick": "Pittsburgh", "gap": 0.08,
+               "rows": [{"taste": "Amélie", "candidate": 0.68, "top_pick": 0.80}, {"taste": "Radiohead", "candidate": 0.84, "top_pick": 0.80}]},
+              {"asked": "Atlantis", "error": "Couldn't find 'Atlantis' as a destination in Qloo."}]
+    reply = chat_agent.city_reply(checks, {"unmatched": []})
+    assert "Your top pick overall is **Pittsburgh** (84)" in reply
+    assert "**Lisbon, Lisbon PT**: 76/100, 8 behind Pittsburgh. Biggest gaps: Amélie (68 vs 80). Known for beaches." in reply
+    assert "**Atlantis**: Couldn't find" in reply
+
+
+def test_lookups_done_but_llm_fails_still_answers(monkeypatch):
+    calls = iter([_call("check_city", {"city": "Lisbon"})])
+    async def complete(client, messages):
+        try:
+            return next(calls)
+        except StopIteration:
+            raise RuntimeError("llm unavailable")
+    monkeypatch.setattr(chat_agent, "_complete", complete)
+    for k, v in {"LLM_API_KEY": "k", "LLM_BASE_URL": "https://llm.invalid/v1", "LLM_MODEL": "m"}.items():
+        monkeypatch.setenv(k, v)
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "Compare Lisbon and Porto"}],
+                                     "profile": {"music": "Radiohead"}}).json()
+    # Porto is still unchecked, so the model is called again and fails; the Lisbon lookup still answers.
+    assert body["steps"] == ["check_city(Lisbon)"] and body["reply"].startswith("Scored on your tastes in Qloo")
+
+
+def test_city_reply_details():
+    city = {"location": "Tokyo, Tokyo JP", "city": "Tokyo", "affinity": 0.81, "city_tags": [], "neighborhoods": [], "vibe": []}
+    checks = [{"asked": "Tokyo", "city": city, "top_pick": "Hong Kong", "gap": 0.09,
+               "rows": [{"taste": "Mozart", "candidate": 0.731, "top_pick": 0.733}]}]
+    assert "Mozart" not in chat_agent.city_reply(checks, {})  # 73 vs 73 is not a gap
+    same = "Qloo can't rank cities by Wes Anderson."
+    assert chat_agent.city_reply([{"asked": "Kyoto", "error": same}, {"asked": "Austin", "error": same}], {}) == same
+    assert agent.location_label("Berlin", {"name": "Mitte", "admin1_region": "Berlin", "country_code": "DE"}) == "Berlin, Berlin DE"
+
+
 def test_split_partner_message():
     user, other = chat_agent.split_partner("I love Radiohead. My partner loves Bad Bunny and tacos. Where should we live?")
     assert "Radiohead" in user and "Bad Bunny" in other and "Radiohead" not in other and "Bad Bunny" not in user
@@ -1279,7 +1357,8 @@ def test_chat_off_scope_question_gets_a_scope_note(monkeypatch):
                               {"content": "Both score 50 on your taste."}])
     body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "Safer and cheaper, Kyoto or Austin?"}],
                                      "profile": {"music": "Radiohead"}}).json()
-    assert body["reply"].startswith("Both score 50") and body["reply"].endswith(chat_agent.SCOPE_NOTE)
+    assert body["reply"].startswith("Scored on your tastes in Qloo") and body["reply"].endswith(chat_agent.SCOPE_NOTE)
+    assert body["steps"] == ["check_city(Kyoto)", "check_city(Austin)"]
 
 
 def test_chat_can_check_four_cities_in_one_step(monkeypatch):
@@ -1319,7 +1398,7 @@ def test_cities_the_model_keeps_skipping_are_checked_by_code(monkeypatch):
     body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "Compare Paris and Berlin"}],
                                      "profile": {"music": "Radiohead"}}).json()
     assert body["steps"] == ["check_city(Paris)", "check_city(Berlin)"]
-    assert body["reply"] == "Paris scores 50, Berlin scores 50."
+    assert body["reply"].startswith("Scored on your tastes in Qloo") and "Hasselhoff" not in body["reply"]
 
 
 def test_films_fall_back_to_a_person(monkeypatch):
@@ -1356,10 +1435,9 @@ def test_tastes_from_the_conversation_and_profile_are_allowed(monkeypatch):
 
 
 def test_check_city_tool_result_is_compact(monkeypatch):
-    sent = _script_llm(monkeypatch, [_call("check_city", {"city": "Lisbon"}), {"content": "ok"}])
-    c.post("/api/chat", json={"messages": [{"role": "user", "content": "Why not Lisbon?"}], "profile": {"music": "Radiohead"}})
-    import json as _j
-    tool = _j.loads(sent[1][-1]["content"])
+    import asyncio
+    result = asyncio.run(agent.scout({"music": "Radiohead", "compare": "Lisbon"}))
+    tool = chat_agent._brief_check(result)
     assert "check_city" in tool and "cities" not in tool
 
 

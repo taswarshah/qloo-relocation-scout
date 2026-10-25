@@ -318,3 +318,5 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .75rem; line-he
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; animation-delay: 0s !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
   .js .reveal { opacity: 1; transform: none; }
 }
+
+.thinking-status { display: block; margin-top: 6px; font-size: .78rem; color: var(--muted, #5b6b64); }

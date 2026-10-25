@@ -197,7 +197,8 @@ class Qloo:
         self.cache_hits = 0
         # Per-endpoint health, so upstream failures are never mistaken for "no matches".
         self.stats: dict[str, dict[str, int]] = defaultdict(
-            lambda: {"calls": 0, "ok": 0, "retries": 0, "timeouts": 0, "http_errors": 0, "rate_limited": 0, "network_errors": 0})
+            lambda: {"calls": 0, "ok": 0, "retries": 0, "timeouts": 0, "http_errors": 0, "rate_limited": 0, "network_errors": 0,
+                     "rejected": 0})
 
     @property
     def failed(self) -> int:
@@ -259,6 +260,12 @@ class Qloo:
         if response.status_code == 429:
             stat["rate_limited"] += 1
             log.warning("qloo %s rate limited after retries", path)
+            return {}
+        if response.status_code == 400:
+            # Qloo rejected the request (e.g. "All of the provided signal.interests.entities were invalid" for an
+            # entity it can't use as a signal). That's about the input, not an outage.
+            stat["rejected"] += 1
+            log.warning("qloo %s rejected the request (HTTP 400)", path)
             return {}
         if response.status_code >= 400:
             stat["http_errors"] += 1
@@ -726,10 +733,14 @@ async def resolve_music(q: Qloo, name: str) -> tuple[MatchedTaste | LifestyleTag
     """A lowercase genre word ("jazz") isn't an artist: search matches a lookalike ("Jazz Liberatorz"). When the
     match isn't the exact name and Qloo has venue tags for the word (jazz clubs), use it as a lifestyle filter."""
     found, line = await resolve_taste(q, "music", name)
-    if name == name.lower() and (not found or normalize(found["name"]) != normalize(name)):
+    plain = lambda s: re.sub(r"\W", "", normalize(s))  # "jay z" == "JAY-Z", "beyonce" == "Beyoncé"
+    if name == name.lower() and found and plain(found["name"]) != plain(name):
         genre, genre_line = await resolve_lifestyle(q, name)
         if genre and genre.get("place_tags"):
             return genre, genre_line
+        # A genre phrase with no venue tags ("death metal") would otherwise become a lookalike artist
+        # ("Death Metal Disco Scene"): report it as not found instead.
+        return None, f"search: '{name}' → no match"
     return found, line
 
 
@@ -785,8 +796,8 @@ async def _scout(q: Qloo, profile: dict[str, str], n_cities: int) -> ScoutResult
             return {"error": "Qloo is not responding right now, so we couldn't read your tastes. Please try again shortly.",
                     "trace": trace, "health": q.health()}
         missed = unmatched(trace)
-        hint = (" Lifestyle words narrow the list, but Qloo ranks cities by the specific things you love, "
-                "so add at least one artist, film, show, book, restaurant or brand.") if tags else ""
+        hint = (f" Words like {', '.join(t['word'] for t in tags[:3])} narrow the venues, but Qloo ranks cities by specific "
+                "names you love, so add at least one artist, film, show, book, restaurant or brand.") if tags else ""
         return {"error": "Couldn't match any of your favorites in Qloo." + (f" Not found: {', '.join(missed)}." if missed else "") + hint,
                 "trace": trace, "unmatched": missed, "health": q.health()}
     signals = _signals(entities)
@@ -809,10 +820,14 @@ async def _scout(q: Qloo, profile: dict[str, str], n_cities: int) -> ScoutResult
     if not cities:
         if q.failed:
             return {"error": "Qloo is not responding right now. Please try again shortly.", "trace": trace, "health": q.health()}
+        if any(v["rejected"] for v in q.stats.values()):
+            return {"error": f"Qloo can't rank cities by {', '.join(e['name'] for e in entities)}: its data has no usable "
+                             "signal for them. Try a specific film, artist or restaurant instead.",
+                    "matched": entities, "lifestyle_tags": tags, "unmatched": unmatched(trace), "trace": trace, "health": q.health()}
         return {"error": "Qloo found no cities for this mix of tastes" + (" in that country" if country_filter else "")
                          + ". Try other favorites" + (" or remove the country limit." if country_filter else "."),
                 "matched": entities, "lifestyle_tags": tags, "unmatched": unmatched(trace), "trace": trace, "health": q.health()}
-    cand_entity = cand_hits[0] if cand_hits else None
+    cand_entity = cand_hits[0] if cand_hits and affinity(cand_hits[0]) > 0 else None  # never show a 0 score
     if cand_entity:
         trace.append(f"insights(destination, filter.results.entities={cand_entity['name']}) → {pct(affinity(cand_entity))}/100")
     t2 = time.perf_counter()
@@ -857,6 +872,8 @@ async def _scout(q: Qloo, profile: dict[str, str], n_cities: int) -> ScoutResult
     if candidate_name:
         scored = [e for e in entities if e["id"] in per_taste]
         out["compare"] = compare(candidate_name, cand_result, results[0] if results else None, scored)
+        if candidate and not cand_entity:  # in Qloo, but these tastes give it no score: say so, never "0/100"
+            out["compare"] = {"error": f"Qloo has no taste score for {candidate['name']} with these tastes."}
     return out
 
 
@@ -880,12 +897,16 @@ async def rank_destinations(q: Qloo, n_cities: int, signals: Parameters, country
     If the genres leave too few cities, the rest of the list comes from the unfiltered ranking."""
     take = take or n_cities * 3
     genre = _tag_filter(tags, "destination_tag")
-    destinations = await q.insights(filter__type="urn:entity:destination", take=take, **signals, **country_filter, **genre)
+    # Zero affinity means no taste signal counted: with a filter but no valid signal, Qloo returns its default
+    # list (Paris, New York, ...) at 0. Those are not recommendations.
+    destinations = [d for d in await q.insights(filter__type="urn:entity:destination", take=take, **signals, **country_filter, **genre)
+                    if affinity(d) > 0]
     if genre:
         names = ", ".join(dict.fromkeys(t["destination_tag"].rsplit(":", 1)[-1].replace("_", " ") for t in tags if t.get("destination_tag")))
         trace.append(f"insights(destination, taste signals, filter.tags={names}) → {len(destinations)} candidates")
         if len(_distinct(destinations)) < n_cities:
-            more = await q.insights(filter__type="urn:entity:destination", take=take, **signals, **country_filter)
+            more = [d for d in await q.insights(filter__type="urn:entity:destination", take=take, **signals, **country_filter)
+                    if affinity(d) > 0]
             destinations += more
             trace.append(f"insights(destination, taste signals) → {len(more)} more (lifestyle filter was too narrow)")
     else:
@@ -1068,7 +1089,8 @@ def location_label(name: str, geocode: dict[str, Any]) -> str:
     town = geocode.get("name") or ""
     a, b = (re.sub(r"[^\w ]", "", normalize(x)) for x in (name, town))  # "Hale'iwa" == "Haleiwa"
     label = f"{name}, {region}".rstrip(", ")
-    if b and not (a in b or b in a or set(a.split()) & set(b.split())):
+    in_city = normalize(geocode.get("admin1_region") or "") == normalize(name)  # Berlin geocoded to its district Mitte
+    if b and not in_city and not (a in b or b in a or set(a.split()) & set(b.split())):
         label += f" · near {town}"
     return label
 

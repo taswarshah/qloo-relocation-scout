@@ -213,6 +213,45 @@ def blend_reply(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def city_reply(checks: list[dict[str, Any]], result: dict[str, Any]) -> str:
+    """The answer to "why not X?" / "compare X, Y, Z", written from check_city results only. Left to the model,
+    it dropped the scores or added claims Qloo never made ("great venues for Radiohead fans")."""
+    scored = [c for c in checks if c.get("city")]
+    scored.sort(key=lambda c: -c["city"]["affinity"])
+    top = next((c["top_pick"] for c in scored if c.get("top_pick")), "")
+    top_score = next((round((c["city"]["affinity"] + c.get("gap", 0)) * 100) for c in scored if c.get("top_pick")), None)
+    lines = [f"Scored on your tastes in Qloo. Your top pick overall is **{top}** ({top_score})." if top else "Scored on your tastes in Qloo:"]
+    for c in scored:
+        city = c["city"]
+        score = round(city["affinity"] * 100)
+        parts = [f"**{city['location']}**: {score}/100"]
+        if c.get("top_pick") and city["city"] != c["top_pick"] and top_score is not None:
+            parts[0] += f", {top_score - score} behind {c['top_pick']}" if top_score > score else f", level with {c['top_pick']}"
+        parts[0] += "."
+        gaps = sorted((r for r in c.get("rows", []) if round(r["top_pick"] * 100) > round(r["candidate"] * 100)),
+                      key=lambda r: r["candidate"] - r["top_pick"])
+        if gaps:
+            parts.append("Biggest gaps: " + ", ".join(f"{r['taste']} ({round(r['candidate'] * 100)} vs {round(r['top_pick'] * 100)})"
+                                                      for r in gaps[:2]) + ".")
+        if city["city_tags"]:
+            parts.append(f"Known for {', '.join(agent.known_for(city['city_tags'][:3]))}.")
+        if city["neighborhoods"]:
+            hood = city["neighborhoods"][0]
+            parts.append(f"Start in {hood['name']} ({', '.join(hood['spots'][:2])}).")
+        if city["vibe"]:
+            parts.append(f"Vibe: {', '.join(v.lower() for v in city['vibe'][:3])}.")
+        lines.append("- " + " ".join(parts))
+    errors = [c for c in checks if not c.get("city")]
+    if not scored and errors and len({c.get("error") for c in errors}) == 1 and errors[0].get("error"):
+        return errors[0]["error"]  # the same problem for every city (e.g. no usable taste): say it once
+    for c in errors:
+        lines.append(f"- **{c['asked']}**: {c.get('error') or 'no Qloo score.'}")
+    missed = result.get("unmatched") or []
+    if missed:
+        lines.append(f"Qloo didn't recognize: {', '.join(missed)}.")
+    return "\n".join(lines)
+
+
 def _brief_check(result: dict[str, Any]) -> dict[str, Any]:
     """check_city's tool result: just the comparison, not the whole shortlist again (five checks repeated it
     five times, which made the model slow and the turn time out)."""
@@ -239,6 +278,7 @@ class Session:
         self.steps: list[str] = []
         self.parts = parts  # (user's words, other person's words) when the message describes both
         self.final: str | None = None  # a reply built from tool data, used instead of the model's text
+        self.checks: list[dict[str, Any]] = []  # check_city results this turn, for the data-only reply
         self.said: list[str] = []  # tokens of everything the user wrote, to catch invented tastes
 
     def invented(self, profile: dict[str, str]) -> list[str]:
@@ -282,6 +322,8 @@ class Session:
                 return {"error": "Pass the city's name, e.g. check_city(city='Lisbon')."}
             self.steps.append(f"check_city({city})")
             self.result = dict(await agent.scout({**self.profile, "compare": city}))
+            self.checks.append({"asked": city, **(self.result.get("compare") or {"error": self.result.get("error")})})
+            self.final = city_reply(self.checks, self.result)
             return _brief_check(self.result)
         if name == "explore_city":
             city, focus = str(args.get("city") or "")[:60].strip(), str(args.get("focus") or "")[:40].strip()
@@ -424,7 +466,12 @@ async def chat(history: list[dict[str, Any]], profile: dict[str, Any] | None) ->
         foreign = non_latin_share(turns[-1]["content"]) > 0.3
         language_nudged = False
         for _ in range(MAX_STEPS):
-            message = await _complete(client, messages)
+            try:
+                message = await _complete(client, messages)
+            except RuntimeError:
+                if session.final:  # the lookups are done: answer from them rather than "agent unavailable"
+                    break
+                raise
             calls = message.get("tool_calls") or []
             if not calls and TEXT_TOOL_CALL.search(message.get("content") or ""):
                 # Anything after a text "tool call" is unfounded: retry once, then refuse rather than show it.
@@ -505,10 +552,15 @@ async def chat(history: list[dict[str, Any]], profile: dict[str, Any] | None) ->
             for call in calls[MAX_CALLS_PER_STEP:]:  # every tool_call must be answered for the next request to be valid
                 messages.append({"role": "tool", "tool_call_id": call.get("id", ""),
                                  "content": json.dumps({"error": "Too many tool calls in one step."})})
+            still_unchecked = [c for c in cities if not any(
+                s.startswith(("check_city(", "explore_city(")) and c.lower() in s.lower() for s in session.steps)]
+            blended = any(s.startswith("blend_profiles(") for s in session.steps)
+            if session.final and not foreign and not still_unchecked and (blended or not partner):
+                break  # the reply is built from the data; another model call would only add latency
         else:
             message = {"content": "I ran out of steps for this question. Try asking one thing at a time."}
-    reply = session.final or (message.get("content") or "").strip() or "Here's what Qloo found."
-    if OFF_SCOPE_QUESTION.search(turns[-1]["content"]) and not re.search(r"(?i)\b(?:doesn't|does not|don't|do not|can't|cannot)\b.{0,40}\b(?:cover|compare|help|data)", reply) and not foreign:
+    reply = (session.final if not foreign else None) or (message.get("content") or "").strip() or "Here's what Qloo found."
+    if OFF_SCOPE_QUESTION.search(turns[-1]["content"]) and not re.search(r"(?i)\b(?:doesn't|does not|don't|do not|can't|cannot)\b.{0,40}\bcover", reply) and not foreign:
         reply += "\n\n" + SCOPE_NOTE
     return {"reply": reply,
             "profile": session.profile, "result": session.result, "steps": session.steps}

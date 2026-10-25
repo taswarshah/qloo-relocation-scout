@@ -403,7 +403,14 @@ async function askAgent(text) {
   const dots = element("span", null, "typing");
   dots.setAttribute("aria-label", "The scout is querying Qloo");
   dots.append(element("i"), element("i"), element("i"));
-  pending.append(dots);
+  // Comparing cities takes ~15-30 s of live Qloo calls; say what's happening so it doesn't look stuck.
+  const multi = /\b(vs\.?|versus|compare|or|why not|what about|how about)\b/i.test(text) && /\b[A-Z][a-z]/.test(text.slice(1));
+  const status = element("span", multi ? "Checking cities on Qloo…" : "Asking Qloo…", "thinking-status");
+  pending.append(dots, status);
+  const timers = [
+    setTimeout(() => { status.textContent = "Scoring on Qloo’s live taste data. This can take 20–30 seconds…"; }, 10000),
+    setTimeout(() => { status.textContent = "Almost there, writing up what Qloo found…"; }, 25000),
+  ];
   agentLog.append(pending);
   agentLog.scrollTop = agentLog.scrollHeight;
   try {
@@ -426,6 +433,7 @@ async function askAgent(text) {
     chatHistory.pop();
     addBubble("agent", "We couldn’t reach the agent. Please try again.");
   } finally {
+    timers.forEach(clearTimeout);
     agentBusy = false; agentSend.disabled = false;
   }
 }
