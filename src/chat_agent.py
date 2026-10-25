@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+from difflib import SequenceMatcher
 from typing import Any
 
 import httpx
@@ -48,8 +49,13 @@ CITY_QUESTION = re.compile(r"(?i:\b(?:why not|what about|how about|compared? (?:
 NOT_CITY = {"I", "My", "Me", "We", "Us", "The", "It", "That", "This", "You", "Your", "Our", "Them", "Her", "His", "Him"}
 CITY_NUDGE = ("The user asked about {cities}. Call check_city once for each of them (one city per call) and answer "
               "only from the results.")
-NO_PROFILE = ("The user's tastes aren't set yet. Call scout_cities first with every taste named in their message, even if "
-              "some seem odd or contradictory (Qloo keeps what it can match), then call this tool again.")
+NO_PROFILE = ("The user's tastes aren't set yet. If the user named any tastes, call scout_cities with exactly those, even "
+              "if some seem odd or contradictory (Qloo keeps what it can match), then call this tool again. If they "
+              "named none, ask what they love. Never invent tastes.")
+# The message names tastes ("I love...", "a fan of..."), so an empty profile can be filled from it.
+NAMES_TASTES = re.compile(r"(?i:\b(?:i|we)(?:'m| am| really)?\s+(?:love|like|adore|enjoy|into|prefer|listen to|watch)\b"
+                          r"|\bfans? of\b|\bfavou?rites?\b)")
+TASTE_FIELDS = ("music", "films", "tv", "books", "food", "brands")  # lifestyle words are often paraphrased, so not checked
 PLACE = r"[A-ZÀ-Þ][\w'.-]*(?:\s+[A-ZÀ-Þ][\w'.-]*){0,2}"
 CITY_PAIR = re.compile(rf"({PLACE})\s+(?i:or|vs\.?|versus)\s+({PLACE})")
 CITY_LIST = re.compile(r"(?i:\b(?:compare|between)\b)[:\s]+([^?.!]+)")
@@ -207,6 +213,23 @@ def blend_reply(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _brief_check(result: dict[str, Any]) -> dict[str, Any]:
+    """check_city's tool result: just the comparison, not the whole shortlist again (five checks repeated it
+    five times, which made the model slow and the turn time out)."""
+    if result.get("error") or not result.get("compare"):
+        return _brief_result(result)
+    cmp = result["compare"]
+    brief: dict[str, Any] = {"check_city": {"verdict": cmp.get("verdict") or cmp.get("error"), "top_pick": cmp.get("top_pick"),
+                                            "rows": [f"{r['taste']}: {round(r['candidate'] * 100)} vs {round(r['top_pick'] * 100)}"
+                                                     for r in cmp.get("rows", [])]}}
+    if cmp.get("city"):
+        brief["city"] = _brief_city(cmp["city"])
+    unmatched = result.get("unmatched") or agent.unmatched(result.get("trace", []))
+    if unmatched:
+        brief["unmatched_tastes"] = unmatched
+    return brief
+
+
 class Session:
     """One chat turn's state: the current profile, the latest renderable result and the step log."""
 
@@ -216,6 +239,16 @@ class Session:
         self.steps: list[str] = []
         self.parts = parts  # (user's words, other person's words) when the message describes both
         self.final: str | None = None  # a reply built from tool data, used instead of the model's text
+        self.said: list[str] = []  # tokens of everything the user wrote, to catch invented tastes
+
+    def invented(self, profile: dict[str, str]) -> list[str]:
+        """Tastes the user never mentioned (seen live: a made-up British profile for "Manchester vs Glasgow?").
+        Names already in the profile are fine, and typos are tolerated ("Radiohed" -> "Radiohead")."""
+        known = {agent.normalize(n) for k, v in self.profile.items() for n in agent.split(v)}
+        def mentioned(name: str) -> bool:
+            return agent.normalize(name) in known or all(
+                any(SequenceMatcher(None, word, said).ratio() >= 0.8 for said in self.said) for word in agent._tokens(name))
+        return [name for k in TASTE_FIELDS for name in agent.split(profile.get(k, "")) if not mentioned(name)]
 
     def misplaced(self, profile: dict[str, str], own: bool) -> list[str]:
         """Tastes given to the wrong person: named only in the other person's part of the message."""
@@ -229,6 +262,10 @@ class Session:
 
     async def run_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         if name == "scout_cities":
+            made_up = self.invented(clean_profile(args))
+            if made_up:
+                return {"error": f"The user never mentioned {', '.join(made_up)}. Use only tastes the user wrote; if they "
+                                 "gave none, ask what they love."}
             wrong = self.misplaced(clean_profile(args), own=True)
             if wrong:
                 return {"error": f"{', '.join(wrong)}: these are the partner's tastes, not the user's. Call scout_cities "
@@ -241,9 +278,11 @@ class Session:
             return {"error": NO_PROFILE}
         if name == "check_city":
             city = str(args.get("city") or "")[:60].strip()
+            if not city:
+                return {"error": "Pass the city's name, e.g. check_city(city='Lisbon')."}
             self.steps.append(f"check_city({city})")
             self.result = dict(await agent.scout({**self.profile, "compare": city}))
-            return _brief_result(self.result)
+            return _brief_check(self.result)
         if name == "explore_city":
             city, focus = str(args.get("city") or "")[:60].strip(), str(args.get("focus") or "")[:40].strip()
             self.steps.append(f"explore_city({city}{', ' + focus if focus else ''})")
@@ -255,6 +294,9 @@ class Session:
         if name == "blend_profiles":
             other = clean_profile(args)
             tastes = {k: v for k, v in other.items() if k != "country"}
+            made_up = self.invented(other)
+            if made_up:
+                return {"error": f"The user never mentioned {', '.join(made_up)}. Pass only the tastes they gave for the other person."}
             wrong = self.misplaced(other, own=False)
             if wrong:
                 return {"error": f"{', '.join(wrong)}: these are the user's own tastes. Pass only the partner's tastes."}
@@ -376,6 +418,8 @@ async def chat(history: list[dict[str, Any]], profile: dict[str, Any] | None) ->
     async with httpx.AsyncClient(timeout=httpx.Timeout(25.0, connect=5.0)) as client:
         nudged = grounded_retry = scope_retry = city_nudged = partner_nudged = False
         cities = asked_cities(turns[-1]["content"])
+        session.said = [w for t in turns if t["role"] == "user" for w in agent._tokens(t["content"])]
+        names_tastes = bool(NAMES_TASTES.search(turns[-1]["content"]))
         partner = bool(PARTNER.search(turns[-1]["content"]))
         foreign = non_latin_share(turns[-1]["content"]) > 0.3
         language_nudged = False
@@ -421,7 +465,8 @@ async def chat(history: list[dict[str, Any]], profile: dict[str, Any] | None) ->
                 continue
             unchecked = [c for c in cities if not any(
                 s.startswith(("check_city(", "explore_city(")) and c.lower() in s.lower() for s in session.steps)]
-            if not calls and unchecked and not city_nudged and not partner:
+            if not calls and unchecked and not city_nudged and not partner and (names_tastes or any(
+                    v for k, v in session.profile.items() if k != "country")):
                 # Every city the user names gets Qloo's score, not a description from the model's memory.
                 city_nudged = True
                 messages.append({"role": "assistant", "content": message.get("content") or ""})

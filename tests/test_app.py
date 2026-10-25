@@ -680,7 +680,7 @@ def test_binding_enables_chat_without_http_llm(monkeypatch):
 def test_text_tool_call_is_retried_then_refused(monkeypatch):
     sent = _script_llm(monkeypatch, [{"content": "[scout_cities(music=X)] Lisbon scores 84!"},
                                      _call("scout_cities", {"music": "X"}), {"content": "grounded"}])
-    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "go"}]}).json()
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "I love X"}]}).json()
     assert body["reply"] == "grounded" and body["steps"][0].startswith("scout_cities(")
     assert sent[1][-1]["content"] == chat_agent.TOOL_NUDGE
     _script_llm(monkeypatch, [{"content": "[scout_cities(music=X)]"}, {"content": "check_city(city=Lisbon) says 84"}])
@@ -690,7 +690,7 @@ def test_text_tool_call_is_retried_then_refused(monkeypatch):
 
 def test_blend_label_never_duplicates_the_user(monkeypatch):
     _script_llm(monkeypatch, [_call("blend_profiles", {"music": "Other", "label": "you and your partner"}), {"content": "ok"}])
-    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "blend"}], "profile": {"music": "X"}}).json()
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "My partner likes Other"}], "profile": {"music": "X"}}).json()
     assert body["result"]["blend"] == {"a": "You", "b": "Partner"}
 
 
@@ -946,6 +946,31 @@ def test_generic_food_words_become_filters(monkeypatch, item, tags, expected):
     assert (found and [x.removeprefix("urn:tag:") for x in found["place_tags"]]) == (expected or None)
 
 
+def test_place_tags_match_whole_words():
+    tags = [{"id": "urn:tag:category:place:technology_park", "name": "Technology park"},
+            {"id": "urn:tag:category:place:blueprint_service", "name": "Blueprint"},
+            {"id": "urn:tag:category:place:blues_club", "name": "Blues club"},
+            {"id": "urn:tag:category:place:jazz_club", "name": "Jazz club"}]
+    assert agent.place_tags(tags, "techno") == []
+    assert [t["name"] for t in agent.place_tags(tags, "blues")] == ["Blues club"]
+    assert [t["name"] for t in agent.place_tags(tags, "jazz")] == ["Jazz club"]
+
+
+def test_a_genre_word_in_music_filters_venues_not_a_lookalike_artist(monkeypatch):
+    """Seen in review: "jazz" matched the group Jazz Liberatorz."""
+    async def get(self, path, params):
+        if path == "/search":
+            q = params["query"]
+            return {"results": [{"entity_id": "id-" + q, "name": "Jazz Liberatorz" if q == "jazz" else q}]}
+        if path == "/v2/tags":
+            return {"results": {"tags": [{"id": "urn:tag:category:place:jazz_club", "name": "Jazz club"}]}}
+        return await fake_get(self, path, params)
+    monkeypatch.setattr(agent.Qloo, "get", get)
+    body = c.post("/api/scout", json={"music": "jazz, Radiohead"}).json()
+    assert [m["name"] for m in body["matched"]] == ["Radiohead"]
+    assert body["lifestyle_tags"][0]["word"] == "jazz" and body["lifestyle_tags"][0]["place_tags"] == ["urn:tag:category:place:jazz_club"]
+
+
 def test_narrow_lifestyle_filter_falls_back_to_full_ranking(monkeypatch):
     calls = []
     async def fake_insights(self, **params):
@@ -1147,9 +1172,13 @@ def test_chat_named_city_is_always_checked(monkeypatch):
 
 
 def test_chat_city_nudge_is_sent_only_once(monkeypatch):
-    _script_llm(monkeypatch, [{"content": "Lisbon is lovely."}, {"content": "Lisbon is still lovely."}])
-    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "What about Lisbon?"}]}).json()
-    assert body["reply"] == "Lisbon is still lovely."
+    sent = _script_llm(monkeypatch, [{"content": "Lisbon is lovely."}, {"content": "Lisbon is still lovely."},
+                                     {"content": "Lisbon scores 50."}])
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "What about Lisbon?"}],
+                                     "profile": {"music": "Radiohead"}}).json()
+    # One nudge; when the model still skips the city, the code looks it up and the model answers from that.
+    assert sum("Call check_city" in m["content"] for m in sent[-1] if m["role"] == "user") == 1
+    assert body["steps"] == ["check_city(Lisbon)"] and body["reply"] == "Lisbon scores 50."
 
 
 def test_chat_partner_tastes_force_the_blend_tool(monkeypatch):
@@ -1301,6 +1330,43 @@ def test_films_fall_back_to_a_person(monkeypatch):
     monkeypatch.setattr(agent.Qloo, "get", get)
     body = c.post("/api/scout", json={"films": "Wes Anderson"}).json()
     assert body["matched"][0]["name"] == "Wes Anderson"
+
+
+def test_chat_rejects_invented_tastes(monkeypatch):
+    """Seen live: "Manchester vs Glasgow vs Dublin?" with no profile got an invented profile (Oasis, Peaky Blinders...)."""
+    sent = _script_llm(monkeypatch, [_call("scout_cities", {"music": "Oasis, Arctic Monkeys", "tv": "Peaky Blinders"}),
+                                     {"content": "What do you love? Tell me a few favorites."}])
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "Manchester vs Glasgow vs Dublin?"}]}).json()
+    assert body["steps"] == [] and body["result"] is None
+    assert "Oasis" in sent[1][-1]["content"] and "never mentioned" in sent[1][-1]["content"]
+
+
+def test_cities_without_tastes_dont_get_a_scout_first_nudge(monkeypatch):
+    sent = _script_llm(monkeypatch, [{"content": "Tell me what you love first."}])
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "Manchester vs Glasgow vs Dublin?"}]}).json()
+    assert body["reply"] == "Tell me what you love first." and len(sent) == 1
+
+
+def test_tastes_from_the_conversation_and_profile_are_allowed(monkeypatch):
+    _script_llm(monkeypatch, [_call("scout_cities", {"music": "Radiohead, Bjork", "films": "Amelie"}), {"content": "ok"}])
+    history = [{"role": "user", "content": "I love Björk"}, {"role": "assistant", "content": "Nice."},
+               {"role": "user", "content": "add Amélie"}]
+    body = c.post("/api/chat", json={"messages": history, "profile": {"music": "Radiohead"}}).json()
+    assert body["steps"] == ["scout_cities(music=Radiohead, Bjork, films=Amelie)"]
+
+
+def test_check_city_tool_result_is_compact(monkeypatch):
+    sent = _script_llm(monkeypatch, [_call("check_city", {"city": "Lisbon"}), {"content": "ok"}])
+    c.post("/api/chat", json={"messages": [{"role": "user", "content": "Why not Lisbon?"}], "profile": {"music": "Radiohead"}})
+    import json as _j
+    tool = _j.loads(sent[1][-1]["content"])
+    assert "check_city" in tool and "cities" not in tool
+
+
+def test_check_city_without_a_name_is_not_a_step(monkeypatch):
+    _script_llm(monkeypatch, [_call("check_city", {"city": ""}), {"content": "ok"}])
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "hi"}], "profile": {"music": "Radiohead"}}).json()
+    assert body["steps"] == []
 
 
 def test_chat_declines_off_topic_code(monkeypatch):

@@ -372,9 +372,18 @@ function profileFromForm() {
   return profile;
 }
 
+// Agent replies use **bold** for city names; render just that, as text nodes (never HTML).
+function richText(text) {
+  const p = element("p");
+  String(text).split(/\*\*(.+?)\*\*/g).forEach((part, i) => {
+    if (part) p.append(i % 2 ? element("strong", part) : document.createTextNode(part));
+  });
+  return p;
+}
+
 function addBubble(role, text, steps) {
   const item = element("li", null, role === "user" ? "from-user" : "from-agent");
-  item.append(element("p", text));
+  item.append(role === "user" ? element("p", text) : richText(text));
   if (steps?.length) {
     const list = element("ul", null, "agent-steps");
     for (const step of steps) list.append(element("li", step));

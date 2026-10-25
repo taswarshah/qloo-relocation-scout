@@ -629,7 +629,9 @@ def place_tags(candidates: list[QlooEntity], query: str = "", limit: int = 2) ->
     words = [w for w in re.findall(r"\w+", normalize(query)) if w not in STOPWORDS and w != "for"]
     def rank(tag: QlooEntity) -> int | None:
         tid = (tag.get("id") or "").removeprefix("urn:tag:")
-        if ":hotel:" in tid or ":restaurant:" in tid or not all(w in tid.rsplit(":", 1)[-1] for w in words):
+        slug_words = {singular(w) for w in tid.rsplit(":", 1)[-1].split("_")}
+        # Whole words only: "techno" is not "technology_park", "blues" is not "blueprint_service".
+        if ":hotel:" in tid or ":restaurant:" in tid or not all(singular(w) in slug_words for w in words):
             return None
         return next((i for i, kind in enumerate(PLACE_TAG_KINDS) if tid.startswith(kind)), None)
     ranked = sorted(((r, i, t) for i, t in enumerate(candidates) if (r := rank(t)) is not None), key=lambda x: x[:2])
@@ -720,6 +722,17 @@ async def resolve_dish(q: Qloo, name: str) -> LifestyleTag | None:
             "place_tags": [t["id"] for t in picked]}
 
 
+async def resolve_music(q: Qloo, name: str) -> tuple[MatchedTaste | LifestyleTag | None, str]:
+    """A lowercase genre word ("jazz") isn't an artist: search matches a lookalike ("Jazz Liberatorz"). When the
+    match isn't the exact name and Qloo has venue tags for the word (jazz clubs), use it as a lifestyle filter."""
+    found, line = await resolve_taste(q, "music", name)
+    if name == name.lower() and (not found or normalize(found["name"]) != normalize(name)):
+        genre, genre_line = await resolve_lifestyle(q, name)
+        if genre and genre.get("place_tags"):
+            return genre, genre_line
+    return found, line
+
+
 async def resolve_food(q: Qloo, name: str) -> tuple[MatchedTaste | LifestyleTag | None, str]:
     dish = await resolve_dish(q, name)
     if dish:
@@ -731,7 +744,8 @@ async def resolve_profile(q: Qloo, profile: dict[str, str], trace: list[str]) ->
     """Step 1: resolve free-text likes to Qloo entity IDs and lifestyle words to tag filters (one parallel round)."""
     jobs = [(category, name) for category in CATEGORY_TYPES for name in split(profile.get(category, ""))][:MAX_ENTITIES]
     words = split(profile.get("lifestyle", ""))[:MAX_TAGS]
-    results = await asyncio.gather(*[resolve_food(q, name) if category == "food" else resolve_taste(q, category, name)
+    resolvers = {"food": resolve_food, "music": resolve_music}
+    results = await asyncio.gather(*[resolvers[category](q, name) if category in resolvers else resolve_taste(q, category, name)
                                      for category, name in jobs],
                                    *[resolve_lifestyle(q, word) for word in words])
     entities: list[MatchedTaste] = []
