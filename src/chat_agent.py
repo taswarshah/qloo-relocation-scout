@@ -37,11 +37,16 @@ GROUNDING_NUDGE = ("Your answer contains numbers no Qloo tool returned ({numbers
 OFF_SCOPE_CLAIM = re.compile(
     r"\b(cheaper|pricier|more (affordable|expensive)|less (affordable|expensive)|(lower|higher) (cost|prices?)|"
     r"(rent|rents|prices?|housing) (is|are) (lower|higher|cheaper)|safer|less safe|more dangerous|"
-    r"(lower|higher) crime|warmer|colder|sunnier)\b", re.I)
+    r"(lower|higher) crime|warmer|colder|sunnier)\b", re.IGNORECASE)
 SCOPE_NUDGE = ("Qloo has no data on cost of living, rent, safety, visas, jobs or weather. Rewrite without comparing "
                "places on those topics: say plainly that Qloo doesn't cover it and suggest a specialist source.")
 SCOPE_ANSWER = ("Qloo covers cultural taste, not cost of living, rent, safety, visas, jobs or weather, so I can't compare "
                 "cities on that. A specialist source such as Numbeo (costs) or official government sites (visas) can help.")
+# "Why not Lisbon?" must get Qloo's score for Lisbon; the model sometimes answered from a scout alone (seen in review).
+CITY_QUESTION = re.compile(r"(?i:\b(?:why not|what about|how about|compared? (?:it |that |this )?(?:with|to)|versus|vs\.?))"
+                           r"\s+([A-ZÀ-Þ][\w'.-]*(?:\s+[A-ZÀ-Þ][\w'.-]*){0,2})")
+NOT_CITY = {"I", "My", "Me", "We", "Us", "The", "It", "That", "This", "You", "Your", "Our", "Them", "Her", "His", "Him"}
+CITY_NUDGE = "The user asked about {city}. Call check_city with city='{city}' and answer from its result."
 AI_BINDING: Any = None  # Workers AI binding (env.AI), injected by the Worker entrypoint
 
 SYSTEM_PROMPT = """You are Relocation Scout, an agent that helps people decide where to live based on their cultural taste.
@@ -231,6 +236,14 @@ def ungrounded(reply: str, evidence: str) -> list[str]:
     return sorted(set(NUMBER.findall(reply)) - known)
 
 
+def asked_city(text: str) -> str | None:
+    """The city in "why not X?" / "what about X?" questions, if the user named one."""
+    match = CITY_QUESTION.search(text)
+    if not match or match.group(1).split()[0] in NOT_CITY:
+        return None
+    return match.group(1)
+
+
 def clean_history(history: list[dict[str, Any]] | None) -> list[dict[str, str]]:
     """Only user/assistant text from the client; tool messages are never accepted from outside."""
     out = []
@@ -252,7 +265,8 @@ async def chat(history: list[dict[str, Any]], profile: dict[str, Any] | None) ->
     # Everything the reply may quote numbers from: the conversation, plus every tool result this turn.
     evidence = [t["content"] for t in turns]
     async with httpx.AsyncClient(timeout=httpx.Timeout(25.0, connect=5.0)) as client:
-        nudged = grounded_retry = scope_retry = False
+        nudged = grounded_retry = scope_retry = city_nudged = False
+        city = asked_city(turns[-1]["content"])
         for _ in range(MAX_STEPS):
             message = await _complete(client, messages)
             calls = message.get("tool_calls") or []
@@ -283,6 +297,12 @@ async def chat(history: list[dict[str, Any]], profile: dict[str, Any] | None) ->
                 scope_retry = True
                 messages.append({"role": "assistant", "content": message.get("content") or ""})
                 messages.append({"role": "user", "content": SCOPE_NUDGE})
+                continue
+            if not calls and city and not city_nudged and not any(
+                    s.startswith(("check_city(", "explore_city(")) and city.lower() in s.lower() for s in session.steps):
+                city_nudged = True
+                messages.append({"role": "assistant", "content": message.get("content") or ""})
+                messages.append({"role": "user", "content": CITY_NUDGE.format(city=city)})
                 continue
             if not calls:
                 break

@@ -1,7 +1,9 @@
 import sys, os; sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 """LIVE test against Qloo (needs .env). Prints results only; never saves Qloo responses."""
-import asyncio, json
+import asyncio
+
 from agent import scout
+
 P = {
  "indie_creative": {"music":"Radiohead, Bon Iver","films":"Amelie, Lost in Translation","food":"Blue Bottle Coffee","lifestyle":"art, cafes, walkable"},
  "foodie_nightlife": {"music":"Daft Punk, Bad Bunny","films":"The Bear","food":"Nobu","lifestyle":"nightlife, beaches"},

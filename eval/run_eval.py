@@ -14,11 +14,19 @@ LLM-only baseline (runs when LLM_API_KEY / LLM_BASE_URL / LLM_MODEL are set): th
 no Qloo. Compared on non-circular measures (genericness across personas, sensitivity to taste changes) plus
 how the baseline's picks score on Qloo's taste graph (labelled as Qloo's own yardstick).
 """
-import asyncio, json, os, re, statistics, sys, time
+import asyncio
+import json
+import os
+import re
+import statistics
+import sys
+import time
 from collections import Counter
+
 import httpx
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
-import agent  # noqa: E402
+import agent
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TASTE_FIELDS = ["music", "films", "tv", "books", "food", "brands"]
@@ -43,7 +51,7 @@ async def baseline(profile: dict) -> list[str] | None:
                                     "messages": [{"role": "user", "content": BASELINE_PROMPT.format(profile=json.dumps(profile))}]})
     r.raise_for_status()
     text = r.json()["choices"][0]["message"]["content"]
-    match = re.search(r"\[.*\]", text, re.S)
+    match = re.search(r"\[.*\]", text, re.DOTALL)
     try:
         cities = json.loads(match.group(0)) if match else []
     except ValueError:

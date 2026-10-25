@@ -1,14 +1,21 @@
 """Relocation Scout web app with security hardening (headers, limits, rate limiting)."""
-import asyncio, logging, os, re, time
+import asyncio
+import logging
+import os
+import re
+import time
 from collections import defaultdict, deque
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
+
 # Endpoints are all `async def`: sync ones run in a thread pool, and Python Workers (Pyodide) have no threads.
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from agent import scout
+
 import chat_agent
+from agent import scout
 
 log = logging.getLogger("scout")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -126,7 +133,7 @@ async def api_scout(p: Profile, request: Request):
             if result.get("error") and (result.get("health") or {}).get("failed_calls"):
                 return JSONResponse(result, status_code=503)  # upstream outage, not "no matches"
             return result
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return JSONResponse({"error": "Took too long. Try fewer tastes."}, status_code=504)
         except Exception:
             log.exception("scout failed")  # httpx errors include URL only; key is in a header, never logged
@@ -164,7 +171,7 @@ async def api_chat(body: ChatRequest, request: Request):
             profile = body.profile.model_dump(exclude={"compare"})
             result = await asyncio.wait_for(chat_agent.chat([m.model_dump() for m in body.messages], profile), timeout=CHAT_TIMEOUT)
             return JSONResponse(result, status_code=422 if result.get("error") else 200)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return JSONResponse({"error": "The agent took too long. Try a simpler question."}, status_code=504)
         except Exception:
             log.exception("chat failed")
@@ -177,7 +184,7 @@ async def health(): return {"ok": True}
 
 if os.path.isdir(STATIC):
     @app.get("/favicon.ico", include_in_schema=False)
-    async def favicon(): return FileResponse(os.path.join(STATIC, "favicon.svg"), media_type="image/svg+xml")
+    async def favicon(): return FileResponse(os.path.join(STATIC, "favicon.ico"), media_type="image/x-icon")
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
     @app.get("/")
     async def index(): return FileResponse(os.path.join(STATIC, "index.html"))

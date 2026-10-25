@@ -2,7 +2,9 @@
 Loads the page, runs a persona (live Qloo via the local server), checks for console/CSP errors,
 exercises the comparison view and saves desktop + mobile screenshots to docs/screenshots/.
 Run: python tests/ui/browser_check.py  (needs `pip install playwright` and a Chrome/Chromium)."""
-import os, sys
+import os
+import sys
+
 from playwright.sync_api import sync_playwright
 
 BASE = os.getenv("UI_BASE", "http://127.0.0.1:8077")

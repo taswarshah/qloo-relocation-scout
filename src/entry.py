@@ -24,8 +24,8 @@ def _load_app(env):
                 value = None
             if value is not None and str(value) not in ("", "undefined"):
                 os.environ[key] = str(value)
-        from app import app
         import chat_agent
+        from app import app
         try:
             chat_agent.AI_BINDING = env.AI  # Workers AI binding powers the chat agent when no LLM_* endpoint is set
         except AttributeError:

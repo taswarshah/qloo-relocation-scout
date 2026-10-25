@@ -1,15 +1,19 @@
 """Offline tests. Qloo is mocked with synthetic data; no real Qloo responses are stored in the repo."""
-import os, sys
+import os
 import selectors
 import socket
+import sys
 from html.parser import HTMLParser
 from pathlib import Path
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 os.environ.setdefault("QLOO_API_KEY", "test-key-not-real")
 os.environ["RATE_LIMIT_PER_MIN"] = "3"
 import pytest
 from fastapi.testclient import TestClient
-import app as appmod, agent
+
+import agent
+import app as appmod
 
 FAKE_CITY = {"name": "<img src=x onerror=alert(1)>", "entity_id": "c1", "properties": {"geocode": {"country_code": "ZZ"}},
              "query": {"affinity": 0.5}, "tags": [{"name": "Fake tag"}]}
@@ -242,7 +246,9 @@ def test_timings_reported():
 
 def test_process_cache_and_allowed_endpoints(monkeypatch):
     """Real Qloo.get with a mock transport: repeat calls hit the in-memory cache; only allowed paths used."""
-    import asyncio, httpx
+    import asyncio
+
+    import httpx
     monkeypatch.undo()  # restore real Qloo.get
     seen = []
     def handler(request):
@@ -288,6 +294,7 @@ def test_nearby_duplicate_cities_merged():
 
 # ---------- Round 3: edge cases, observability, relevance, thin data, comparison ----------
 import asyncio
+
 import httpx
 
 
@@ -430,7 +437,6 @@ def test_compare_input_validated():
 
 
 def test_default_rate_limit_is_12(monkeypatch):
-    import importlib
     monkeypatch.delenv("RATE_LIMIT_PER_MIN", raising=False)
     src = open(os.path.join(os.path.dirname(__file__), "..", "src", "app.py")).read()
     assert 'os.getenv("RATE_LIMIT_PER_MIN", "12")' in src
@@ -463,7 +469,9 @@ def _real_qloo(monkeypatch, handler):
 
 
 def test_transient_timeout_is_retried_once(monkeypatch):
-    import asyncio, httpx
+    import asyncio
+
+    import httpx
     attempts = []
     def handler(request):
         attempts.append(1)
@@ -480,7 +488,9 @@ def test_transient_timeout_is_retried_once(monkeypatch):
 
 
 def test_persistent_timeout_counts_as_failure(monkeypatch):
-    import asyncio, httpx
+    import asyncio
+
+    import httpx
     def handler(request):
         raise httpx.ReadTimeout("slow")
     _real_qloo(monkeypatch, handler)
@@ -644,6 +654,7 @@ def test_llm_failure_is_a_safe_502(monkeypatch):
 def test_all_endpoints_are_async():
     """Python Workers (Pyodide) can't start threads, and FastAPI runs sync endpoints in a thread pool."""
     import inspect
+
     from fastapi.routing import APIRoute
     sync = [r.path for r in appmod.app.routes if isinstance(r, APIRoute) and not inspect.iscoroutinefunction(r.endpoint)]
     assert sync == []
@@ -691,7 +702,8 @@ def test_scores_round_like_the_ui():
 
 
 def test_pacer_spaces_requests_to_qloo_rate_limit():
-    import asyncio, time
+    import asyncio
+    import time
     pacer = agent._Pacer(rate=20.0, burst=1)
     async def run():
         t = time.monotonic()
@@ -705,7 +717,8 @@ def test_pacer_spaces_requests_to_qloo_rate_limit():
 def test_pacer_survives_a_waiter_that_never_resumes():
     """Seen live: a Worker request torn down mid-sleep never released the pacer's lock, so every later
     request hung until the 60 s timeout. An abandoned wait must not block the next caller."""
-    import asyncio, time
+    import asyncio
+    import time
     pacer = agent._Pacer(rate=20.0, burst=1)
     async def run():
         await pacer.wait()
@@ -729,7 +742,9 @@ def test_leaked_scout_slots_expire(monkeypatch):
 
 
 def test_429_waits_for_qloo_reset_header(monkeypatch):
-    import asyncio, httpx
+    import asyncio
+
+    import httpx
     seen = []
     def handler(request):
         seen.append(1)
@@ -1056,6 +1071,32 @@ def test_chat_plain_scope_answer_is_kept(monkeypatch):
     _script_llm(monkeypatch, [{"content": "Qloo doesn't cover cost of living; try a specialist site like Numbeo."}])
     body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "Is it expensive?"}]}).json()
     assert body["reply"].startswith("Qloo doesn't cover cost of living")
+
+
+def test_chat_named_city_is_always_checked(monkeypatch):
+    """Seen in review: "I love Radiohead and coffee. Why not Lisbon?" got a scout and vague lines, no Lisbon score."""
+    sent = _script_llm(monkeypatch, [_call("scout_cities", {"music": "Radiohead"}),
+                                     {"content": "Lisbon is known for its beaches."},
+                                     _call("check_city", {"city": "Lisbon"}, id="c2"),
+                                     {"content": "Here is how Lisbon compares."}])
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "I love Radiohead. Why not Lisbon?"}]}).json()
+    assert body["steps"][-1] == "check_city(Lisbon)" and body["reply"] == "Here is how Lisbon compares."
+    assert "check_city" in sent[2][-1]["content"] and "Lisbon" in sent[2][-1]["content"]
+
+
+def test_chat_city_nudge_is_sent_only_once(monkeypatch):
+    _script_llm(monkeypatch, [{"content": "Lisbon is lovely."}, {"content": "Lisbon is still lovely."}])
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "What about Lisbon?"}]}).json()
+    assert body["reply"] == "Lisbon is still lovely."
+
+
+@pytest.mark.parametrize("text,city", [
+    ("I love Radiohead and coffee. Why not Lisbon?", "Lisbon"), ("what about Mexico City?", "Mexico City"),
+    ("How about São Paulo", "São Paulo"), ("Compare it with Berlin please", "Berlin"),
+    ("What about cost of living?", None), ("Why not?", None), ("What about my partner?", None),
+    ("What about Europe?", "Europe")])
+def test_asked_city(text, city):
+    assert chat_agent.asked_city(text) == city
 
 
 @pytest.mark.parametrize("text,hit", [

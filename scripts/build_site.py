@@ -1,5 +1,8 @@
 """Build the Workers static-asset directory (.site/) from static/: index.html at /, the rest under /static/."""
-import pathlib, re, shutil, sys
+import pathlib
+import re
+import shutil
+import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -11,6 +14,7 @@ for f in (ROOT / "static").iterdir():
         shutil.copytree(f, SITE / "static" / f.name)
     elif f.is_file():
         shutil.copy(f, SITE / ("index.html" if f.name == "index.html" else f"static/{f.name}"))
+shutil.copy(ROOT / "static/favicon.ico", SITE / "favicon.ico")  # browsers and crawlers ask for /favicon.ico directly
 # Same security headers the FastAPI middleware sets, so static assets get them too.
 csp = re.search(r'CSP = \(("(?:[^"\\]|\\.)*"\s*)+\)', (ROOT / "src/app.py").read_text()).group(0)
 csp = "".join(re.findall(r'"((?:[^"\\]|\\.)*)"', csp))

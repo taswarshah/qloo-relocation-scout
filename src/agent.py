@@ -1,17 +1,17 @@
 """Relocation Scout agent: turns a taste profile into city + neighborhood picks using Qloo's Insights API."""
 import asyncio
+import logging
 import math
 import os
 import re
 import time
-from collections import OrderedDict
 import unicodedata
-from collections import Counter, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from difflib import SequenceMatcher
 from typing import Any, TypedDict
+
 import httpx
 from dotenv import load_dotenv
-import logging
 
 log = logging.getLogger("scout.qloo")
 
