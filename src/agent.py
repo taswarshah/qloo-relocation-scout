@@ -114,6 +114,7 @@ class CityResult(TypedDict):
     """Backward-compatible city response, with an additive venue fallback."""
 
     city: str
+    entity_id: str
     location: str
     country: str | None
     affinity: float
@@ -680,17 +681,40 @@ async def resolve_lifestyle(q: Qloo, word: str) -> tuple[LifestyleTag | None, st
     return tag, f"tags: '{word}' → filter " + " · ".join(parts)
 
 
+DISH_TAG_KINDS = ("urn:tag:specialty_dish:place:", "urn:tag:cuisine:qloo:")
+
+
+async def resolve_dish(q: Qloo, name: str) -> LifestyleTag | None:
+    """A food favorite that is a dish or cuisine ("biryani", "tacos") rather than a restaurant. Searching places
+    for it matches a lookalike restaurant ("Biryani Zone"), so it becomes a venue filter on Qloo's dish tags."""
+    dishes = [t for t in await q.tags(name) if (t.get("id") or "").startswith(DISH_TAG_KINDS)
+              and singular(t.get("name") or "") == singular(name)]
+    if not dishes:
+        return None
+    return {"id": dishes[0]["id"], "word": name, "name": dishes[0]["name"], "place_tags": [t["id"] for t in dishes[:2]]}
+
+
+async def resolve_food(q: Qloo, name: str) -> tuple[MatchedTaste | LifestyleTag | None, str]:
+    dish = await resolve_dish(q, name)
+    if dish:
+        return dish, f"tags: '{name}' → dish filter venues {', '.join(t.removeprefix('urn:tag:') for t in dish['place_tags'])}"
+    return await resolve_taste(q, "food", name)
+
+
 async def resolve_profile(q: Qloo, profile: dict[str, str], trace: list[str]) -> tuple[list[MatchedTaste], list[LifestyleTag]]:
     """Step 1: resolve free-text likes to Qloo entity IDs and lifestyle words to tag filters (one parallel round)."""
     jobs = [(category, name) for category in CATEGORY_TYPES for name in split(profile.get(category, ""))][:MAX_ENTITIES]
     words = split(profile.get("lifestyle", ""))[:MAX_TAGS]
-    results = await asyncio.gather(*[resolve_taste(q, category, name) for category, name in jobs],
+    results = await asyncio.gather(*[resolve_food(q, name) if category == "food" else resolve_taste(q, category, name)
+                                     for category, name in jobs],
                                    *[resolve_lifestyle(q, word) for word in words])
     entities: list[MatchedTaste] = []
     tags: list[LifestyleTag] = []
     for found, line in results[:len(jobs)]:
         trace.append(line)
-        if found and found["id"] not in {e["id"] for e in entities}:
+        if found and "word" in found:  # a dish: filters venues like a lifestyle word
+            tags.append(found)  # type: ignore[arg-type]
+        elif found and found["id"] not in {e["id"] for e in entities}:
             entities.append(found)
     for found, line in results[len(jobs):]:
         trace.append(line)
@@ -774,7 +798,7 @@ async def _scout(q: Qloo, profile: dict[str, str], n_cities: int) -> ScoutResult
     trace.append(f"insights(destination, filter.results.entities=shown cities) per-taste x{len(entities)} for attribution")
     built = [build_city(c, found, per_taste, entities) for c, found in zip(shown, gathered[len(entities):])]
     if cand_entity and len(shown) == len(cities):
-        cand_result = next(b for b in built if b["city"] == cand_entity["name"])
+        cand_result = next(b for b in built if b["entity_id"] == cand_entity["entity_id"])
     else:
         cand_result = built.pop() if cand_entity else None
     results = located(built, n_cities, trace)
@@ -981,7 +1005,7 @@ def _distinct(destinations: list[QlooEntity]) -> list[QlooEntity]:
     cities: list[QlooEntity] = []
     for destination in destinations:
         geocode = (destination.get("properties") or {}).get("geocode") or {}
-        key = (normalize(destination["name"]), geocode.get("country_code"))
+        key = (normalize(clean_name(destination["name"])), geocode.get("country_code"))
         country = geocode.get("country_code")
         if key in seen or any(near(destination, kept) and same_country(country, ((kept.get("properties") or {}).get("geocode") or {}).get("country_code"))
                               for kept in cities):
@@ -1004,11 +1028,46 @@ def location_label(name: str, geocode: dict[str, Any]) -> str:
     return label
 
 
+LATIN = re.compile(r"[A-Za-zÀ-ɏ]")
+ADMIN_SUFFIX = re.compile(r"[-\s](?:shi|si)$", re.IGNORECASE)  # "Kobe-shi" (Japanese/Korean for "city")
+REGION_SUFFIX = re.compile(r"\s*-\s*[^-]+\s(?:State|Province|Region|Prefecture|County|District)$", re.IGNORECASE)
+
+
+def clean_name(name: str) -> str:
+    """Tidy Qloo destination names: "Busan 釜山 Busan 釜山" -> "Busan", "GRA Benin City-Edo State" -> "GRA Benin City"."""
+    words = name.split()
+    if LATIN.search(name):
+        words = [w for w in words if LATIN.search(w)] or words
+    half = len(words) // 2
+    if half and len(words) % 2 == 0 and words[:half] == words[half:]:
+        words = words[:half]
+    return ADMIN_SUFFIX.sub("", REGION_SUFFIX.sub("", " ".join(words))).strip() or name
+
+
+def district_title(name: str, geocode: dict[str, Any]) -> str | None:
+    """'Tokyo (Shinjuku)' for a destination that is a district of a bigger city, else None.
+
+    Two conservative signals: the name contains the city ("GRA Benin City" in Benin City), or the
+    geocode city is also its region (Tokyo in Tokyo), as with metropolitan cities. Other geocode
+    mismatches stay as "· near X": they are as often Qloo geocode quirks as real districts."""
+    town = geocode.get("name") or ""
+    a, b = (re.sub(r"[^\w ]", "", normalize(x)) for x in (name, town))
+    if not b or a == b or a in b:
+        return None
+    if b in a:
+        short = re.sub(re.escape(town), "", name, flags=re.IGNORECASE).strip(" -,")
+        return f"{town} ({short})" if short and not short[0].islower() else town
+    if normalize(geocode.get("admin1_region") or "") == normalize(town) and not set(a.split()) & set(b.split()):
+        return f"{town} ({name})"
+    return None
+
+
 def build_city(city: QlooEntity, found: Found,
                per_taste: dict[str, dict[str, float]], entities: list[MatchedTaste] | None = None) -> CityResult:
     """Build one city card from destination affinity, per-taste attribution and local places."""
     geocode = (city.get("properties") or {}).get("geocode") or {}
-    location = location_label(city["name"], geocode)
+    name = clean_name(city["name"])
+    location = location_label(name, geocode)
     places, by_radius, radius_km, venue_filter = found
     neighborhoods, top_spots, vibe = summarize_places(places, city, by_radius)
     names = {e["id"]: e["name"] for e in entities or []}
@@ -1017,7 +1076,7 @@ def build_city(city: QlooEntity, found: Found,
                      key=lambda item: -item[1])
     relevant = local_relevant(places, city, by_radius)
     result: CityResult = {
-        "city": city["name"], "location": location, "country": geocode.get("country_code"),
+        "city": name, "entity_id": city.get("entity_id", ""), "location": location, "country": geocode.get("country_code"),
         "affinity": round(affinity(city), 3),
         "city_tags": [tag["name"] for tag in city.get("tags") or []][:5],
         "neighborhoods": neighborhoods, "top_spots": top_spots, "vibe": vibe,
@@ -1028,8 +1087,11 @@ def build_city(city: QlooEntity, found: Found,
                      "neighborhoods": len(neighborhoods), "tastes_scored": sum(1 for _, s in drivers if s > 0),
                      "tastes_total": len(entities) if entities else len(per_taste)},
     }
-    result["why"] = explain(result, [])
     result["mislocated"] = mislocated(city, location, relevant)
+    title = None if result["mislocated"] else district_title(name, geocode)
+    if title:
+        result["city"], result["location"] = title, location_label(geocode["name"], geocode)
+    result["why"] = explain(result, [])
     return result
 
 

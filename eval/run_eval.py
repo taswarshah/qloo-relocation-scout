@@ -17,6 +17,7 @@ how the baseline's picks score on Qloo's taste graph (labelled as Qloo's own yar
 import asyncio
 import json
 import os
+import pathlib
 import re
 import statistics
 import sys
@@ -188,7 +189,7 @@ async def _no_summary(*_args):
 
 async def main():
     agent.llm_summary = _no_summary  # the deployed app writes no LLM summary; measure that same pipeline
-    personas = json.load(open(os.path.join(HERE, "personas.json")))
+    personas = json.loads(pathlib.Path(HERE, "personas.json").read_text())
     rows = []
     for p in personas:
         row = await run_persona(p); rows.append(row)
@@ -205,8 +206,8 @@ async def main():
     secs = [r["seconds"] for r in good]
     lines = [
         "# Evaluation results", "",
-        f"Run: {time.strftime('%Y-%m-%d %H:%M %Z')} · live Qloo hackathon API · {len(personas)} synthetic personas "
-        f"(see `personas.json`) · {len(good)} completed · {sum(1 for r in good if r['partial'])} with partial upstream data.",
+        (f"Run: {time.strftime('%Y-%m-%d %H:%M %Z')} · live Qloo hackathon API · {len(personas)} synthetic personas "
+         f"(see `personas.json`) · {len(good)} completed · {sum(1 for r in good if r['partial'])} with partial upstream data."),
         "Only aggregate numbers are recorded; per Qloo's terms no response data is stored in the repo.", "",
         "## Coverage",
         f"- Tastes resolved by `/search`: **{res}/{asked} ({res/asked:.0%})**",
@@ -221,8 +222,8 @@ async def main():
         f"- Claims in explanations backed by Qloo-derived fields: **{claims_ok}/{claims} ({claims_ok/max(1,claims):.1%})**",
         "  (scores, per-taste affinities, city tags, neighborhoods, spots and vibe are each checked against the structured result)", "",
         "## Sensitivity",
-        f"- Mean Jaccard overlap of top-4 cities, persona vs perturbed persona: **{statistics.mean(r['jaccard_top4_vs_perturbed'] for r in good):.2f}** "
-        "(lower = recommendations respond to taste changes; 1.0 would mean taste is ignored)",
+        (f"- Mean Jaccard overlap of top-4 cities, persona vs perturbed persona: **{statistics.mean(r['jaccard_top4_vs_perturbed'] for r in good):.2f}** "
+         "(lower = recommendations respond to taste changes; 1.0 would mean taste is ignored)"),
         *[f"  - {r['id']}: {r['jaccard_top4_vs_perturbed']:.2f}" for r in good], "",
         "## Latency (cold cache, first run of each persona)",
         f"- p50 {statistics.median(secs):.1f} s · max {max(secs):.1f} s", "",
@@ -231,7 +232,7 @@ async def main():
     ]
     if len(good) < len(rows):
         lines += ["", "## Errors", *[f"- {r['id']}: {r['error']}" for r in rows if "error" in r]]
-    open(os.path.join(HERE, "RESULTS.md"), "w").write("\n".join(lines) + "\n")
+    pathlib.Path(HERE, "RESULTS.md").write_text("\n".join(lines) + "\n")
     print("\n".join(lines))
 
 if __name__ == "__main__":

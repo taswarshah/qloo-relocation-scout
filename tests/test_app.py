@@ -86,7 +86,7 @@ def test_no_cors():
     assert "access-control-allow-origin" not in r.headers
 
 def test_frontend_has_no_innerhtml():
-    js = open(os.path.join(os.path.dirname(__file__), "..", "static", "app.js")).read()
+    js = Path(__file__).parent.parent.joinpath("static", "app.js").read_text()
     assert all(sink not in js for sink in ("innerHTML", "insertAdjacentHTML", "outerHTML"))
 
 
@@ -269,7 +269,7 @@ def test_process_cache_and_allowed_endpoints(monkeypatch):
 
 
 def test_frontend_share_link_has_no_html_injection():
-    js = open(os.path.join(os.path.dirname(__file__), "..", "static", "app.js")).read()
+    js = Path(__file__).parent.parent.joinpath("static", "app.js").read_text()
     assert "URLSearchParams" in js and "eval(" not in js and "document.write" not in js
 
 
@@ -438,7 +438,7 @@ def test_compare_input_validated():
 
 def test_default_rate_limit_is_12(monkeypatch):
     monkeypatch.delenv("RATE_LIMIT_PER_MIN", raising=False)
-    src = open(os.path.join(os.path.dirname(__file__), "..", "src", "app.py")).read()
+    src = Path(__file__).parent.parent.joinpath("src", "app.py").read_text()
     assert 'os.getenv("RATE_LIMIT_PER_MIN", "12")' in src
 
 
@@ -449,7 +449,7 @@ def test_city_named_venue_excluded():
 
 
 def test_eval_claim_checker_detects_unbacked_claims():
-    import sys as _s; _s.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "eval"))
+    import sys as _s; _s.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "eval"))  # noqa: I001
     import run_eval
     city = {"city": "X", "affinity": 0.8, "drivers": [{"taste": "A", "affinity": 0.9}], "city_tags": ["Beaches"],
             "neighborhoods": [{"name": "Old Town", "spots": ["Cafe, Bar", "Museum"]}], "top_spots": [], "vibe": ["Lively"],
@@ -550,7 +550,7 @@ def test_candidate_already_shown_is_not_fetched_twice(monkeypatch):
 
 def test_forwarded_for_uses_proxy_appended_entry(monkeypatch):
     class Req:
-        headers = {"x-forwarded-for": "6.6.6.6, 10.0.0.1"}
+        headers = {"x-forwarded-for": "6.6.6.6, 10.0.0.1"}  # noqa: RUF012
         client = None
     monkeypatch.setattr(appmod, "TRUST_PROXY", True)
     assert appmod.client_ip(Req()) == "10.0.0.1"  # leftmost entry is spoofable
@@ -906,6 +906,28 @@ def test_lifestyle_words_become_filters_not_signals(monkeypatch):
     assert venues and venues[0]["filter.tags"] == "urn:tag:category:place:cafe"
 
 
+def test_a_dish_in_food_becomes_a_venue_filter_not_a_lookalike_restaurant(monkeypatch):
+    """Seen in review: "biryani" matched a restaurant called Biryani Zone."""
+    seen = []
+    async def get(self, path, params):
+        seen.append((path, dict(params)))
+        if path == "/v2/tags" and params["filter.query"] == "biryani":
+            return {"results": {"tags": [{"id": "urn:tag:specialty_dish:place:biryani", "name": "Biryani"},
+                                         {"id": "urn:tag:genre:place:hotel:biryani", "name": "Biryani"},
+                                         {"id": "urn:tag:cuisine:qloo:biryani", "name": "Biryani"}]}}
+        if path == "/v2/tags":
+            return {"results": {"tags": [{"id": "urn:tag:nearby_attraction:qloo:nobu", "name": "Nobu"}]}}
+        if path == "/search":
+            return {"results": [{"entity_id": "id-" + params["query"], "name": params["query"]}]}
+        return await fake_get(self, path, params)
+    monkeypatch.setattr(agent.Qloo, "get", get)
+    body = c.post("/api/scout", json={"music": "Radiohead", "food": "biryani, Nobu"}).json()
+    assert [m["name"] for m in body["matched"]] == ["Radiohead", "Nobu"]
+    dish = body["lifestyle_tags"][0]
+    assert dish["word"] == "biryani" and dish["place_tags"] == ["urn:tag:specialty_dish:place:biryani", "urn:tag:cuisine:qloo:biryani"]
+    assert not any(p == "/search" and q.get("query") == "biryani" for p, q in seen)
+
+
 def test_narrow_lifestyle_filter_falls_back_to_full_ranking(monkeypatch):
     calls = []
     async def fake_insights(self, **params):
@@ -999,6 +1021,28 @@ def test_mislocated_city_is_skipped_for_the_spare():
     assert trace == ["skipped Doolin: Qloo's coordinates for it point to Stowe (no venue there lists Doolin in its address)"]
 
 
+@pytest.mark.parametrize(("raw", "clean"), [("Busan 釜山", "Busan"), ("Busan 釜山 Busan 釜山", "Busan"),
+                                            ("GRA Benin City-Edo State", "GRA Benin City"), ("東京", "東京"),
+                                            ("Hale'iwa", "Hale'iwa"), ("Mexico City", "Mexico City"),
+                                            ("Kobe-shi", "Kobe"), ("Kobe shi", "Kobe"), ("Shirakawa-go", "Shirakawa-go")])
+def test_clean_place_name(raw, clean):
+    assert agent.clean_name(raw) == clean
+
+
+@pytest.mark.parametrize(("name", "geocode", "title", "location"), [
+    ("Shinjuku", {"name": "Tokyo", "admin1_region": "Tokyo", "country_code": "JP"}, "Tokyo (Shinjuku)", "Tokyo, Tokyo JP"),
+    ("GRA Benin City-Edo State", {"name": "Benin City", "admin1_region": "Edo", "country_code": "NG"},
+     "Benin City (GRA)", "Benin City, Edo NG"),
+    ("Busan 釜山", {"name": "Busan", "admin1_region": "Busan", "country_code": "KR"}, "Busan", "Busan, Busan KR"),
+    ("Pittsburgh", {"name": "Pittsburgh", "admin1_region": "Pennsylvania", "country_code": "US"}, "Pittsburgh",
+     "Pittsburgh, Pennsylvania US")])
+def test_districts_are_titled_by_their_real_city(name, geocode, title, location):
+    city = {"name": name, "entity_id": "d1", "query": {"affinity": 0.8}, "properties": {"geocode": geocode}}
+    result = agent.build_city(city, ([], True, 15, []), {}, [])
+    assert (result["city"], result["location"], result["entity_id"]) == (title, location, "d1")
+    assert not result["mislocated"]
+
+
 @pytest.mark.parametrize(("word", "expected"), [("beaches", "beach"), ("galleries", "gallery"), ("cafes", "cafe"),
                                                 ("parks", "park"), ("glass", "glass"), ("boxes", "box"), ("art", "art")])
 def test_singular(word, expected):
@@ -1088,6 +1132,95 @@ def test_chat_city_nudge_is_sent_only_once(monkeypatch):
     _script_llm(monkeypatch, [{"content": "Lisbon is lovely."}, {"content": "Lisbon is still lovely."}])
     body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "What about Lisbon?"}]}).json()
     assert body["reply"] == "Lisbon is still lovely."
+
+
+def test_chat_partner_tastes_force_the_blend_tool(monkeypatch):
+    """Seen in review: both people's tastes in one message got "tell me more" instead of couple mode."""
+    sent = _script_llm(monkeypatch, [{"content": "Tell me more about your tastes!"},
+                                     _call("scout_cities", {"music": "Radiohead"}),
+                                     _call("blend_profiles", {"music": "Bad Bunny", "food": "tacos"}, id="c2"),
+                                     {"content": "Here are places for both of you."}])
+    msg = "I love Radiohead. My partner loves Bad Bunny and tacos. Where should we both live?"
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": msg}]}).json()
+    assert body["steps"][-1].startswith("blend_profiles(") and body["reply"] == "Here are places for both of you."
+    assert "blend_profiles" in sent[1][-1]["content"]
+
+
+def test_chat_swapped_partner_tastes_are_sent_back(monkeypatch):
+    """Seen live: the model put the partner's Bad Bunny and tacos into the user's own profile."""
+    sent = _script_llm(monkeypatch, [_call("scout_cities", {"music": "Bad Bunny", "films": "Lost in Translation"}),
+                                     _call("scout_cities", {"music": "Radiohead", "films": "Lost in Translation"}, id="c2"),
+                                     _call("blend_profiles", {"music": "Bad Bunny", "food": "tacos"}, id="c3"),
+                                     {"content": "Here are places for both of you."}])
+    msg = "I love Radiohead and Lost in Translation. My partner loves Bad Bunny and tacos. Where should we both live?"
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": msg}]}).json()
+    assert "Bad Bunny" in sent[1][-1]["content"] and "partner" in sent[1][-1]["content"]  # the error names the swap
+    assert body["steps"] == ["scout_cities(music=Radiohead, films=Lost in Translation)",
+                             "blend_profiles(You + Partner: music=Bad Bunny, food=tacos)"]
+    assert body["profile"] == {"music": "Radiohead", "films": "Lost in Translation"}
+
+
+def test_split_partner_message():
+    user, other = chat_agent.split_partner("I love Radiohead. My partner loves Bad Bunny and tacos. Where should we live?")
+    assert "Radiohead" in user and "Bad Bunny" in other and "Radiohead" not in other and "Bad Bunny" not in user
+    assert chat_agent.split_partner("I love Radiohead") is None
+
+
+def test_blend_before_the_users_own_tastes_asks_for_them(monkeypatch):
+    sent = _script_llm(monkeypatch, [_call("blend_profiles", {"music": "Bad Bunny"}), {"content": "ok"}, {"content": "ok"}])
+    c.post("/api/chat", json={"messages": [{"role": "user", "content": "My partner loves Bad Bunny"}]})
+    assert "scout_cities" in sent[1][-1]["content"]  # the tool error tells the model to set the user's tastes first
+
+
+def test_chat_checks_every_city_the_user_names(monkeypatch):
+    sent = _script_llm(monkeypatch, [{"content": "Both have vibrant jazz scenes."},
+                                     {**_call("check_city", {"city": "Kyoto"}), "tool_calls": [
+                                         _call("check_city", {"city": "Kyoto"}, id="a")["tool_calls"][0],
+                                         _call("check_city", {"city": "Austin"}, id="b")["tool_calls"][0]]},
+                                     {"content": "Here is how they compare on your taste."}])
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "Safer and cheaper, Kyoto or Austin?"}],
+                                     "profile": {"music": "Radiohead"}}).json()
+    assert body["steps"] == ["check_city(Kyoto)", "check_city(Austin)"]
+    assert "Kyoto" in sent[1][-1]["content"] and "Austin" in sent[1][-1]["content"]
+
+
+def test_chat_off_scope_question_gets_a_scope_note(monkeypatch):
+    """"Safer and cheaper, Kyoto or Austin?" may get taste scores, but must say Qloo doesn't cover safety or cost."""
+    _script_llm(monkeypatch, [{**_call("check_city", {"city": "Kyoto"}), "tool_calls": [
+                                  _call("check_city", {"city": "Kyoto"}, id="a")["tool_calls"][0],
+                                  _call("check_city", {"city": "Austin"}, id="b")["tool_calls"][0]]},
+                              {"content": "Both score 50 on your taste."}])
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "Safer and cheaper, Kyoto or Austin?"}],
+                                     "profile": {"music": "Radiohead"}}).json()
+    assert body["reply"].startswith("Both score 50") and body["reply"].endswith(chat_agent.SCOPE_NOTE)
+
+
+def test_chat_can_check_four_cities_in_one_step(monkeypatch):
+    calls = [_call("check_city", {"city": n}, id=n)["tool_calls"][0] for n in ("Lisbon", "Porto", "Berlin", "Vienna")]
+    _script_llm(monkeypatch, [{"content": None, "tool_calls": calls}, {"content": "Done."}])
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "Compare Lisbon, Porto, Berlin and Vienna"}],
+                                     "profile": {"music": "Radiohead"}}).json()
+    assert body["steps"] == [f"check_city({n})" for n in ("Lisbon", "Porto", "Berlin", "Vienna")]
+
+
+def test_chat_replies_in_the_users_script(monkeypatch):
+    sent = _script_llm(monkeypatch, [{"content": "Qloo doesn't cover that."}, {"content": "کلو اس کا احاطہ نہیں کرتا۔"}])
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "کیا یہ شہر سستا ہے؟"}]}).json()
+    assert body["reply"] == "کلو اس کا احاطہ نہیں کرتا۔" and "language" in sent[1][-1]["content"]
+
+
+def test_chat_declines_off_topic_code(monkeypatch):
+    _script_llm(monkeypatch, [{"content": "Sure!\n```python\nprint('hi')\n```"}])
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "Write me a Python script"}]}).json()
+    assert body["reply"] == chat_agent.OFF_TOPIC_ANSWER
+
+
+@pytest.mark.parametrize("text,cities", [
+    ("Safer and cheaper, Kyoto or Austin?", ["Kyoto", "Austin"]),
+    ("Compare Lisbon, Porto, Berlin and Vienna", ["Lisbon", "Porto", "Berlin", "Vienna"]),
+    ("Why not Lisbon?", ["Lisbon"]), ("I love Radiohead and Bon Iver", []), ("What about my partner?", [])])
+def test_asked_cities(text, cities):
+    assert chat_agent.asked_cities(text) == cities
 
 
 @pytest.mark.parametrize("text,city", [

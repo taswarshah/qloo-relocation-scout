@@ -1,4 +1,4 @@
-import sys, os; sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
+import sys, os; sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))  # noqa: I001
 """LIVE test against Qloo (needs .env). Prints results only; never saves Qloo responses."""
 import asyncio
 
