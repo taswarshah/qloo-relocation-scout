@@ -1,4 +1,4 @@
-# Devpost submission draft: Relocation Scout (DRAFT, not submitted)
+# Devpost submission: Relocation Scout
 
 **Tagline:** An agent with taste that finds the city, and the neighborhood, where your kind of life already exists.
 
