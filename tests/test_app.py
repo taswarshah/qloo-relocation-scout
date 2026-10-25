@@ -1321,6 +1321,69 @@ def test_city_reply_details():
     assert agent.location_label("Berlin", {"name": "Mitte", "admin1_region": "Berlin", "country_code": "DE"}) == "Berlin, Berlin DE"
 
 
+def test_exact_tv_title_beats_a_documentary_under_films(monkeypatch):
+    async def get(self, path, params):
+        if path == "/search" and params["types"] == "urn:entity:movie":
+            return {"results": [{"entity_id": "doc", "name": "No Half Measures: Creating the Final Season of Breaking Bad"}]}
+        if path == "/search" and params["types"] == "urn:entity:tv_show":
+            return {"results": [{"entity_id": "bb", "name": "Breaking Bad"}]}
+        return await fake_get(self, path, params)
+    monkeypatch.setattr(agent.Qloo, "get", get)
+    body = c.post("/api/scout", json={"films": "Breaking Bad"}).json()
+    assert body["matched"][0] == {"id": "bb", "name": "Breaking Bad", "category": "tv"}
+
+
+def test_one_llm_failure_is_retried(monkeypatch):
+    replies = iter([RuntimeError("llm unavailable"), {"content": "Tell me what you love."}])
+    async def complete(client, messages):
+        r = next(replies)
+        if isinstance(r, Exception):
+            raise r
+        return r
+    monkeypatch.setattr(chat_agent, "_complete", complete)
+    monkeypatch.setattr(chat_agent.asyncio, "sleep", lambda *_: asyncio_noop())
+    for k, v in {"LLM_API_KEY": "k", "LLM_BASE_URL": "https://llm.invalid/v1", "LLM_MODEL": "m"}.items():
+        monkeypatch.setenv(k, v)
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "hi"}]}).json()
+    assert body["reply"] == "Tell me what you love."
+
+
+def test_llm_down_after_scout_still_answers_with_checks(monkeypatch):
+    steps = iter([_call("scout_cities", {"music": "Kendrick Lamar"})])
+    async def complete(client, messages):
+        try:
+            return next(steps)
+        except StopIteration:
+            raise RuntimeError("llm unavailable")
+    monkeypatch.setattr(chat_agent, "_complete", complete)
+    monkeypatch.setattr(chat_agent.asyncio, "sleep", lambda *_: asyncio_noop())
+    for k, v in {"LLM_API_KEY": "k", "LLM_BASE_URL": "https://llm.invalid/v1", "LLM_MODEL": "m"}.items():
+        monkeypatch.setenv(k, v)
+    msg = "I'm a big fan of Kendrick Lamar. How do Toronto and Melbourne compare?"
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": msg}]}).json()
+    assert body["steps"] == ["scout_cities(music=Kendrick Lamar)", "check_city(Toronto)", "check_city(Melbourne)"]
+    assert body["reply"].startswith("Scored on your tastes in Qloo")
+
+
+def test_llm_down_after_scout_answers_with_the_shortlist(monkeypatch):
+    steps = iter([_call("scout_cities", {"music": "Radiohead"})])
+    async def complete(client, messages):
+        try:
+            return next(steps)
+        except StopIteration:
+            raise RuntimeError("llm unavailable")
+    monkeypatch.setattr(chat_agent, "_complete", complete)
+    monkeypatch.setattr(chat_agent.asyncio, "sleep", lambda *_: asyncio_noop())
+    for k, v in {"LLM_API_KEY": "k", "LLM_BASE_URL": "https://llm.invalid/v1", "LLM_MODEL": "m"}.items():
+        monkeypatch.setenv(k, v)
+    body = c.post("/api/chat", json={"messages": [{"role": "user", "content": "I love Radiohead. Where should I live?"}]}).json()
+    assert body["reply"].startswith("Your best matches in Qloo:")
+
+
+async def asyncio_noop():
+    return None
+
+
 def test_split_partner_message():
     user, other = chat_agent.split_partner("I love Radiohead. My partner loves Bad Bunny and tacos. Where should we live?")
     assert "Radiohead" in user and "Bad Bunny" in other and "Radiohead" not in other and "Bad Bunny" not in user
@@ -1434,6 +1497,13 @@ def test_tastes_from_the_conversation_and_profile_are_allowed(monkeypatch):
     assert body["steps"] == ["scout_cities(music=Radiohead, Bjork, films=Amelie)"]
 
 
+def test_invented_lifestyle_words_are_rejected_but_word_forms_pass():
+    s = chat_agent.Session({}, None)
+    s.said = agent._tokens("I love Radiohead and walking to cafes near beaches")
+    assert s.invented({"music": "Radiohead", "lifestyle": "walkable, cafe, beach"}) == []
+    assert s.invented({"music": "Radiohead", "lifestyle": "nightlife"}) == ["nightlife"]
+
+
 def test_check_city_tool_result_is_compact(monkeypatch):
     import asyncio
     result = asyncio.run(agent.scout({"music": "Radiohead", "compare": "Lisbon"}))
@@ -1456,7 +1526,15 @@ def test_chat_declines_off_topic_code(monkeypatch):
 @pytest.mark.parametrize("text,cities", [
     ("Safer and cheaper, Kyoto or Austin?", ["Kyoto", "Austin"]),
     ("Compare Lisbon, Porto, Berlin and Vienna", ["Lisbon", "Porto", "Berlin", "Vienna"]),
-    ("Why not Lisbon?", ["Lisbon"]), ("I love Radiohead and Bon Iver", []), ("What about my partner?", [])])
+    ("Why not Lisbon?", ["Lisbon"]), ("I love Radiohead and Bon Iver", []), ("What about my partner?", []),
+    ("I'm a big fan of Kendrick Lamar and Breaking Bad, and I love sushi. How do Toronto and Melbourne compare?",
+     ["Toronto", "Melbourne"]),
+    ("I love Radiohead and Bjork, how do Toronto and Melbourne compare", ["Toronto", "Melbourne"]),
+    ("Which is better for me, Lisbon or Porto?", ["Lisbon", "Porto"]),
+    ("Is Toronto or Melbourne better?", ["Toronto", "Melbourne"]),
+    ("Toronto vs Melbourne", ["Toronto", "Melbourne"]),
+    ("What's the difference between Berlin and Vienna?", ["Berlin", "Vienna"]),
+    ("I love Kendrick Lamar and Breaking Bad", [])])
 def test_asked_cities(text, cities):
     assert chat_agent.asked_cities(text) == cities
 

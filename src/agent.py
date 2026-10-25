@@ -669,6 +669,11 @@ async def resolve_book(q: Qloo, name: str) -> tuple[MatchedTaste | None, str]:
             f"search: '{name}' → {hit['name']} (book) → author {person['name']} (person)")
 
 
+def same_name(a: str, b: str) -> bool:
+    """Exact match ignoring case, accents and punctuation ("jay z" == "JAY-Z")."""
+    return re.sub(r"\W", "", normalize(a)) == re.sub(r"\W", "", normalize(b))
+
+
 CREATOR_WORKS = re.compile(r"^(.+?)(?:'s)?\s+(?:films|movies|shows|series)$", re.IGNORECASE)
 
 
@@ -681,6 +686,12 @@ async def resolve_taste(q: Qloo, category: str, name: str) -> tuple[MatchedTaste
         entity = await q.search(name, "urn:entity:person")
     else:
         entity = await q.search(name, CATEGORY_TYPES[category])
+        if category in ("films", "tv") and not (entity and same_name(entity["name"], name)):
+            # "Breaking Bad" under films matched a documentary about it; an exact title of the other kind wins.
+            other = "tv" if category == "films" else "films"
+            swapped = await q.search(name, CATEGORY_TYPES[other])
+            if swapped and same_name(swapped["name"], name):
+                entity, category = swapped, other
         if not entity and category in ("films", "tv"):
             entity = await q.search(name, "urn:entity:person")  # a director or actor ("Wes Anderson")
     if not entity:
@@ -733,8 +744,7 @@ async def resolve_music(q: Qloo, name: str) -> tuple[MatchedTaste | LifestyleTag
     """A lowercase genre word ("jazz") isn't an artist: search matches a lookalike ("Jazz Liberatorz"). When the
     match isn't the exact name and Qloo has venue tags for the word (jazz clubs), use it as a lifestyle filter."""
     found, line = await resolve_taste(q, "music", name)
-    plain = lambda s: re.sub(r"\W", "", normalize(s))  # "jay z" == "JAY-Z", "beyonce" == "Beyoncé"
-    if name == name.lower() and found and plain(found["name"]) != plain(name):
+    if name == name.lower() and found and not same_name(found["name"], name):
         genre, genre_line = await resolve_lifestyle(q, name)
         if genre and genre.get("place_tags"):
             return genre, genre_line

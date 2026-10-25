@@ -6,6 +6,7 @@ backed by the Qloo pipeline in agent.py. Two LLM backends, both speaking OpenAI-
   * any OpenAI-compatible endpoint (LLM_API_KEY / LLM_BASE_URL / LLM_MODEL).
 Without either, the chat panel is hidden and the app still runs the form flow.
 """
+import asyncio
 import json
 import logging
 import os
@@ -55,11 +56,14 @@ NO_PROFILE = ("The user's tastes aren't set yet. If the user named any tastes, c
 # The message names tastes ("I love...", "a fan of..."), so an empty profile can be filled from it.
 NAMES_TASTES = re.compile(r"(?i:\b(?:i|we)(?:'m| am| really)?\s+(?:love|like|adore|enjoy|into|prefer|listen to|watch)\b"
                           r"|\bfans? of\b|\bfavou?rites?\b)")
-TASTE_FIELDS = ("music", "films", "tv", "books", "food", "brands")  # lifestyle words are often paraphrased, so not checked
+TASTE_FIELDS = ("music", "films", "tv", "books", "food", "brands", "lifestyle")
 PLACE = r"[A-ZÀ-Þ][\w'.-]*(?:\s+[A-ZÀ-Þ][\w'.-]*){0,2}"
-CITY_PAIR = re.compile(rf"({PLACE})\s+(?i:or|vs\.?|versus)\s+({PLACE})")
-CITY_LIST = re.compile(r"(?i:\b(?:compare|between)\b)[:\s]+([^?.!]+)")
 MAX_CHECKED_CITIES = 5
+COMPARING = re.compile(r"(?i)\b(?:compare[ds]?|comparison|vs\.?|versus|or|between|which|better|differ\w*)\b")
+CONNECTOR = re.compile(r"(?i)\s*(?:,|,?\s*(?:and|or|vs\.?|versus|&))\s*")
+TASTE_SPAN = re.compile(r"(?i)\b(?:loves?|likes?|adores?|enjoys?|into|fans? of|listen(?:s|ing)? to|watch(?:es|ing)?)\b[^,.;!?]*")
+LEAD_WORDS = {"is", "are", "how", "what", "which", "where", "should", "would", "could", "do", "does", "compare", "tell",
+              "between", "and", "or", "vs", "versus", "why", "who", "can", "will", "please", "hey", "hi", "so", "also", "but"}
 MAX_CALLS_PER_STEP = MAX_CHECKED_CITIES  # "compare these four cities" fits in one step
 # A question about cost, safety etc.: the reply may give taste scores, but must say what Qloo doesn't cover.
 OFF_SCOPE_QUESTION = re.compile(r"(?i:\b(?:cheap\w*|cost\w*|expensive|afford\w*|rent|prices?|safe\w*|crime|dangerous|"
@@ -252,6 +256,22 @@ def city_reply(checks: list[dict[str, Any]], result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def shortlist_reply(result: dict[str, Any]) -> str:
+    """A plain answer from a scout result (used when the model is unavailable after the lookups)."""
+    lines = ["Your best matches in Qloo:"]
+    for city in result.get("cities", []):
+        parts = [f"**{city['location']}**: {round(city['affinity'] * 100)}/100."]
+        if city["city_tags"]:
+            parts.append(f"Known for {', '.join(agent.known_for(city['city_tags'][:3]))}.")
+        if city["neighborhoods"]:
+            hood = city["neighborhoods"][0]
+            parts.append(f"Start in {hood['name']} ({', '.join(hood['spots'][:2])}).")
+        lines.append("- " + " ".join(parts))
+    if result.get("unmatched"):
+        lines.append(f"Qloo didn't recognize: {', '.join(result['unmatched'])}.")
+    return "\n".join(lines)
+
+
 def _brief_check(result: dict[str, Any]) -> dict[str, Any]:
     """check_city's tool result: just the comparison, not the whole shortlist again (five checks repeated it
     five times, which made the model slow and the turn time out)."""
@@ -285,9 +305,11 @@ class Session:
         """Tastes the user never mentioned (seen live: a made-up British profile for "Manchester vs Glasgow?").
         Names already in the profile are fine, and typos are tolerated ("Radiohed" -> "Radiohead")."""
         known = {agent.normalize(n) for k, v in self.profile.items() for n in agent.split(v)}
+        def close(word: str, said: str) -> bool:  # typos, and word forms ("walking" ~ "walkable", "beach" ~ "beaches")
+            return SequenceMatcher(None, word, said).ratio() >= 0.8 or (len(word) > 3 and word[:4] == said[:4])
         def mentioned(name: str) -> bool:
             return agent.normalize(name) in known or all(
-                any(SequenceMatcher(None, word, said).ratio() >= 0.8 for said in self.said) for word in agent._tokens(name))
+                any(close(word, said) for said in self.said) for word in agent._tokens(name))
         return [name for k in TASTE_FIELDS for name in agent.split(profile.get(k, "")) if not mentioned(name)]
 
     def misplaced(self, profile: dict[str, str], own: bool) -> list[str]:
@@ -424,17 +446,39 @@ def non_latin_share(text: str) -> float:
 
 
 def asked_cities(text: str) -> list[str]:
-    """Every city the user asks about: "why not X?", "X or Y?", "compare A, B and C" (at most MAX_CHECKED_CITIES)."""
-    found = [m.group(1) for m in CITY_QUESTION.finditer(text)]
-    if "?" in text or CITY_LIST.search(text):
-        found += [name for m in CITY_PAIR.finditer(text) for name in m.groups()]
-    for m in CITY_LIST.finditer(text):
-        found += [part.strip() for part in re.split(r",|\band\b|\bor\b|\bvs\.?", m.group(1)) if part.strip()]
+    """Every city the user asks about, whatever the wording: "why not X?", "X or Y?", "X vs Y", "how do X and Y
+    compare?", "compare A, B and C" (at most MAX_CHECKED_CITIES). Taste phrases ("I love Kendrick Lamar and
+    Breaking Bad") are removed first, so their names are never taken for cities."""
+    found: list[str] = []
+    for sentence in re.split(r"[.;!?\n]+(?=\s|$)|[.;!?\n]+", text):
+        if not (COMPARING.search(sentence) or "?" in text):
+            continue
+        rest = TASTE_SPAN.sub(lambda m: " " * len(m.group(0)), sentence)
+        names = [(m.start(), m.end(), strip_lead(m.group(0))) for m in re.finditer(PLACE, rest)]
+        group: list[str] = []
+        for i, (_, end_, name) in enumerate(names):
+            if not name:
+                continue
+            group.append(name)
+            joined = i + 1 < len(names) and CONNECTOR.fullmatch(rest[end_:names[i + 1][0]]) and names[i + 1][2]
+            if not joined:
+                if len(group) > 1:
+                    found += group
+                group = []
+    found += [strip_lead(m.group(1)) for m in CITY_QUESTION.finditer(text)]
     cities: list[str] = []
     for name in found:
-        if re.fullmatch(PLACE, name) and name.split()[0] not in NOT_CITY and name not in cities:
+        if name and re.fullmatch(PLACE, name) and name.split()[0] not in NOT_CITY and name not in cities:
             cities.append(name)
     return cities[:MAX_CHECKED_CITIES]
+
+
+def strip_lead(name: str) -> str:
+    """'Is Toronto' -> 'Toronto', 'Compare Lisbon' -> 'Lisbon', "What's" -> ''."""
+    words = name.split()
+    while words and re.sub(r"['’]s$", "", words[0].lower()) in LEAD_WORDS:
+        words.pop(0)
+    return " ".join(words)
 
 
 def clean_history(history: list[dict[str, Any]] | None) -> list[dict[str, str]]:
@@ -464,12 +508,25 @@ async def chat(history: list[dict[str, Any]], profile: dict[str, Any] | None) ->
         names_tastes = bool(NAMES_TASTES.search(turns[-1]["content"]))
         partner = bool(PARTNER.search(turns[-1]["content"]))
         foreign = non_latin_share(turns[-1]["content"]) > 0.3
-        language_nudged = False
+        language_nudged = llm_retried = False
         for _ in range(MAX_STEPS):
             try:
                 message = await _complete(client, messages)
             except RuntimeError:
                 if session.final:  # the lookups are done: answer from them rather than "agent unavailable"
+                    break
+                if not llm_retried:
+                    llm_retried = True  # Workers AI fails intermittently; one retry clears most of it
+                    await asyncio.sleep(2)
+                    continue
+                # Still down: finish from Qloo data when there is any, rather than "agent unavailable".
+                if any(v for k, v in session.profile.items() if k != "country"):
+                    for city in [c for c in cities if not any(c.lower() in st.lower() for st in session.steps
+                                                              if st.startswith("check_city("))]:
+                        await session.run_tool("check_city", {"city": city})
+                if not session.final and session.result and session.result.get("cities") and not session.result.get("error"):
+                    session.final = shortlist_reply(session.result)
+                if session.final:
                     break
                 raise
             calls = message.get("tool_calls") or []
