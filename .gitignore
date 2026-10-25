@@ -9,7 +9,7 @@ cache/
 qloo_responses/
 .pytest_cache/
 
-# Screenshots containing Qloo results stay local (Qloo terms: no response data in a public repo); upload them to Devpost directly
+# Local screenshot runs (tests/ui/browser_check.py); curated README shots are named live-*.png
 docs/screenshots/*results*.png
 docs/screenshots/*compare*.png
 .site/

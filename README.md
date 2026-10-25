@@ -9,7 +9,7 @@ Built for the [Qloo Agentic Hackathon](https://qloo.devpost.com/).
 **Repo:** https://github.com/taswarshah/qloo-relocation-scout · **License:** MIT
 
 ## Contents
-[Screenshots](#screenshots) · [Features](#features) · [How it works](#how-it-works) · [Run locally](#run-locally) · [Docker](#run-with-docker) · [Deploy](#deploy-to-cloudflare-workers) · [Tests](#tests-and-evaluation) · [Usage](#usage) · [API](#api) · [Troubleshooting](#troubleshooting) · [Limitations](#limitations)
+[Screenshots](#screenshots) · [Live examples](#live-examples) · [Features](#features) · [How it works](#how-it-works) · [Run locally](#run-locally) · [Docker](#run-with-docker) · [Deploy](#deploy-to-cloudflare-workers) · [Tests](#tests-and-evaluation) · [Usage](#usage) · [API](#api) · [Troubleshooting](#troubleshooting) · [Limitations](#limitations)
 
 ## Screenshots
 | Home (desktop) | Taste form, filled from a preset |
@@ -18,7 +18,16 @@ Built for the [Qloo Agentic Hackathon](https://qloo.devpost.com/).
 | **Ask the scout (chat agent)** | **Mobile** |
 | ![Chat panel with suggestion chips and a couple-mode question typed in](docs/screenshots/desktop-chat-panel.png) | ![Mobile home](docs/screenshots/mobile-home.png) ![Mobile form with the Foodie and nightlife preset](docs/screenshots/mobile-form.png) |
 
-Result screenshots are attached to the Devpost entry instead: Qloo's [hackathon guide](https://docs.qloo.com/reference/qloo-llm-hackathon-developer-guide) asks that Qloo response data not be stored in a public repo. Open the [live demo](https://scout.taswar.dev/?music=Radiohead,Bon%20Iver&films=Lost%20in%20Translation&lifestyle=walkable&compare=Lisbon) to see results.
+### Live examples
+Captured from the live site, https://scout.taswar.dev, on 25 Oct 2026. Scores come from Qloo at that time and can change.
+
+| Input | Screenshot |
+|---|---|
+| **1. Form search:** Music `Radiohead, Bon Iver` · Films `Lost in Translation` · Lifestyle `walkable` ([open](https://scout.taswar.dev/?music=Radiohead,Bon%20Iver&films=Lost%20in%20Translation&lifestyle=walkable)) | ![Shortlist of taste-matched cities with scores, strongest connections and neighborhoods](docs/screenshots/live-1-shortlist.png) |
+| **2. "Why not my city?":** same profile + *Already considering a city?* `Lisbon` ([open](https://scout.taswar.dev/?music=Radiohead,Bon%20Iver&films=Lost%20in%20Translation&lifestyle=walkable&compare=Lisbon)) | ![Lisbon scored next to the shortlist, with the gap explained taste by taste](docs/screenshots/live-2-why-not-lisbon.png) |
+| **3. Couple mode (chat):** `I love Radiohead and Lost in Translation. My partner loves Bad Bunny and tacos. Where should we both live?` | ![Chat reply with each person's score per city and whose tastes matched](docs/screenshots/live-3-couple-chat.png) |
+| **4. Multi-city (chat):** `I love Arctic Monkeys. What about Manchester vs Glasgow vs Dublin?` | ![Chat reply scoring Manchester, Glasgow and Dublin with the Qloo calls it made](docs/screenshots/live-4-multicity-chat.png) |
+| **5. Mobile (390×844):** same input as example 1 | ![Mobile view of the top match card](docs/screenshots/live-5-mobile.png) |
 
 ## Features
 - **Taste-matched shortlist.** Cities ranked by Qloo affinity (0–100), each with the tastes that drive its score, Qloo tags, neighborhoods to start in, taste-matched venues and the local vibe.
@@ -154,7 +163,7 @@ curl -s localhost:8077/api/scout -H 'content-type: application/json' \
 `src/agent.py` (Qloo pipeline) · `src/chat_agent.py` (agent loop) · `src/app.py` (API and security) · `src/entry.py` (Worker entry) · `static/` (frontend) · `eval/` (evaluation and LLM-only baseline) · `tests/`
 
 ## Credits and security
-Qloo Insights API, FastAPI, httpx; DM Sans and Manrope fonts (SIL OFL); Lucide icons (ISC); hero photo of Manarola from Unsplash. No secrets or Qloo data are stored in the repo; see [SECURITY.md](SECURITY.md).
+Qloo Insights API, FastAPI, httpx; DM Sans and Manrope fonts (SIL OFL); Lucide icons (ISC); hero photo of Manarola from Unsplash. No secrets or Qloo API responses are stored in the repo (only the example screenshots above show Qloo results); see [SECURITY.md](SECURITY.md).
 
 ## License
 [MIT](LICENSE)

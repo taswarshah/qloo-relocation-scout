@@ -9,7 +9,7 @@ Please report vulnerabilities privately to taswarshah0344@gmail.com. Don't open 
 - CI runs gitleaks over the full git history on every push.
 
 ## Qloo data
-No Qloo API responses, fixtures or caches are stored in this repo, as Qloo's hackathon terms require. Responses are cached only in process memory (a bounded LRU with a TTL, shared across requests), which Qloo's guide permits. Nothing is written to disk. Tests use synthetic mock data.
+No Qloo API responses, fixtures or caches are stored in this repo; the only Qloo-derived content is the five README example screenshots in `docs/screenshots/live-*.png`. Responses are cached only in process memory (a bounded LRU with a TTL, shared across requests), which Qloo's guide permits. Nothing is written to disk. Tests use synthetic mock data.
 
 ## Hardening in place
 | Area | Control |
